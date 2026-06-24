@@ -1,0 +1,7 @@
+{
+  "bindAddr": "0.0.0.0",
+  "bindPort": 7000,
+  "token": "your-secret-token",
+  "encryptKey": "214f1afda32e8b712a87cbec119147c9cbdf5c9f463183aeee102c3fc23a0d48",
+  "logLevel": "info"
+}
