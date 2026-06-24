@@ -1,0 +1,29 @@
+{
+  "serverAddr": "your-server.com",
+  "serverPort": 7000,
+  "token": "your-secret-token",
+  "encryptKey": "214f1afda32e8b712a87cbec119147c9cbdf5c9f463183aeee102c3fc23a0d48",
+  "logLevel": "info",
+  "proxies": [
+    {
+      "name": "ssh",
+      "localIP": "127.0.0.1",
+      "localPort": 22,
+      "remotePort": 6000
+    },
+    {
+      "name": "web",
+      "localIP": "127.0.0.1",
+      "localPort": 8080,
+      "remotePort": 8080
+    }
+  ],
+  "rproxies": [
+    {
+      "name": "db-tunnel",
+      "localPort": 3307,
+      "remoteIP": "10.0.0.50",
+      "remotePort": 3306
+    }
+  ]
+}
