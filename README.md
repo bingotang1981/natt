@@ -8,6 +8,8 @@ natt is a lightweight NAT traversal tool written in Go, with **zero external dep
 - **Proxy mode**: Expose internal services (SSH/HTTP/DB) behind NAT to external users through a public server
 - **RProxy mode**: Allow internal applications to access remote services through a tunnel (reverse proxy)
 
+**Centralized configuration**: Proxy and reverse proxy mapping rules are defined on the **server** (per client identity). Clients fetch their rules automatically upon connection — no local rule configuration needed.
+
 ## Architecture
 
 ```
@@ -57,7 +59,7 @@ natt is a lightweight NAT traversal tool written in Go, with **zero external dep
 
 ### 3. Configure the Server
 
-Create `server.json`:
+Create `server.json` — proxy and reverse proxy rules are defined **per client** on the server:
 
 ```json
 {
@@ -65,7 +67,18 @@ Create `server.json`:
   "bindPort": 7000,
   "token": "your-secret-token",
   "encryptKey": "214f1afda32e8b712a87cbec119147c9cbdf5c9f463183aeee102c3fc23a0d48",
-  "logLevel": "info"
+  "logLevel": "info",
+  "clients": {
+    "client-a": {
+      "proxies": [
+        {"name": "ssh", "localIP": "127.0.0.1", "localPort": 22, "remotePort": 6000},
+        {"name": "web", "localIP": "127.0.0.1", "localPort": 8080, "remotePort": 8080}
+      ],
+      "rproxies": [
+        {"name": "db-tunnel", "localPort": 3307, "remoteIP": "10.0.0.50", "remotePort": 3306}
+      ]
+    }
+  }
 }
 ```
 
@@ -77,7 +90,7 @@ Start on the public machine:
 
 ### 4. Configure the Client
 
-Create `client.json`:
+Create `client.json` — proxy rules are no longer configured locally; they are fetched from the server upon connection.
 
 ```json
 {
@@ -85,29 +98,8 @@ Create `client.json`:
   "serverPort": 7000,
   "token": "your-secret-token",
   "encryptKey": "214f1afda32e8b712a87cbec119147c9cbdf5c9f463183aeee102c3fc23a0d48",
-  "logLevel": "info",
-  "proxies": [
-    {
-      "name": "ssh",
-      "localIP": "127.0.0.1",
-      "localPort": 22,
-      "remotePort": 6000
-    },
-    {
-      "name": "web",
-      "localIP": "127.0.0.1",
-      "localPort": 8080,
-      "remotePort": 8080
-    }
-  ],
-  "rproxies": [
-    {
-      "name": "db-tunnel",
-      "localPort": 3307,
-      "remoteIP": "10.0.0.50",
-      "remotePort": 3306
-    }
-  ]
+  "clientId": "client-a",
+  "logLevel": "info"
 }
 ```
 
@@ -132,9 +124,10 @@ curl http://your-server.com:8080
 ### Control Flow
 
 1. The client actively connects to the server's `bindPort`, establishing a **control connection** (long-lived)
-2. The client sends a `Register` message to complete authentication (with Token verification)
-3. The client sends a `ProxyRequest` to request port mapping
-4. The server replies with `ProxyResponse` and starts listening on the corresponding `remotePort`
+2. The client sends a `Register` message (with `clientId` and Token) to complete authentication
+3. The client sends a `ConfigQuery` message to request its proxy/rproxy rules
+4. The server looks up the rules for the given `clientId`, starts listening on the corresponding `remotePort`s, and replies with a `ConfigResponse` containing the rules
+5. The client applies the received configuration — records proxy mappings and starts local RProxy listeners
 
 ### Proxy Data Flow (External → Internal)
 
@@ -203,6 +196,32 @@ Options:
 | `token` | string | `""` | Authentication token (leave empty to disable) |
 | `encryptKey` | string | `""` | AES-256 key (leave empty to disable encryption) |
 | `logLevel` | string | `"info"` | Log level: debug/info/warn/error |
+| `clients` | object | `{}` | Per-client proxy and rproxy rules, keyed by `clientId` |
+
+#### Client Rules (`clients.<clientId>`)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `proxies` | array | `[]` | Proxy mapping rules for this client |
+| `rproxies` | array | `[]` | Reverse proxy mapping rules for this client |
+
+#### Proxy Mapping Rules (`proxies[]`)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | — | Rule name (unique per client) |
+| `localIP` | string | `"127.0.0.1"` | Client-local service IP |
+| `localPort` | int | — | Client-local service port |
+| `remotePort` | int | — | Server-exposed port (0 = random assignment) |
+
+#### Reverse Proxy Mapping Rules (`rproxies[]`)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | — | Rule name (unique per client) |
+| `localPort` | int | — | Client listen port |
+| `remoteIP` | string | — | Remote service IP (reachable from the server) |
+| `remotePort` | int | — | Remote service port |
 
 ### Client Configuration (`client.json`)
 
@@ -212,30 +231,13 @@ Options:
 | `serverPort` | int | `7000` | Server port |
 | `token` | string | `""` | Authentication token |
 | `encryptKey` | string | `""` | AES-256 key |
+| `clientId` | string | `""` | Client identity (used by server to look up rules; auto-generated if empty) |
 | `logLevel` | string | `"info"` | Log level |
 | `heartbeatIntervalMs` | int | `45000` | Heartbeat interval (milliseconds) |
 | `reconnectBaseDelayMs` | int | `500` | Reconnect base delay (milliseconds) |
 | `reconnectMaxDelayMs` | int | `60000` | Reconnect maximum delay (milliseconds) |
-| `proxies` | array | `[]` | Proxy mapping rules (proxy mode) |
-| `rproxies` | array | `[]` | Reverse proxy mapping rules (rproxy mode) |
 
-#### Proxy Mapping Rules (`proxies[]`)
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `name` | string | — | Rule name (unique identifier) |
-| `localIP` | string | `"127.0.0.1"` | Local service IP |
-| `localPort` | int | — | Local service port |
-| `remotePort` | int | — | Server-exposed port (0 = random assignment) |
-
-#### Reverse Proxy Mapping Rules (`rproxies[]`)
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `name` | string | — | Rule name (unique identifier) |
-| `localPort` | int | — | Client listen port |
-| `remoteIP` | string | — | Remote service IP (reachable from the server) |
-| `remotePort` | int | — | Remote service port |
+> **Note**: Proxy and reverse proxy mapping rules are no longer defined in the client configuration. They are configured on the server under `clients.<clientId>` and fetched automatically by the client after registration via the `ConfigQuery` message. This enables centralized management of tunnel rules.
 
 ## Error Handling
 
