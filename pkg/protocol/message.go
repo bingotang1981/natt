@@ -23,6 +23,8 @@ const (
 	TypeError          MessageType = 0x0A
 	TypeRProxyRequest  MessageType = 0x0B
 	TypeRProxyResponse MessageType = 0x0C
+	TypeConfigQuery    MessageType = 0x0D
+	TypeConfigResponse MessageType = 0x0E
 )
 
 // Message represents a framed protocol message.
