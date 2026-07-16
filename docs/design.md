@@ -42,7 +42,7 @@ NAT traversal (also known as NAT piercing / reverse proxy) enables machines behi
 |------|-------------|
 | **Server** | The relay service running on a public machine; accepts client connections and opens proxy ports |
 | **Client** | The proxy agent running on an internal machine; actively connects to the server and requests port mappings |
-| **Control Connection** | A long-lived TCP connection from the client to the server, used only for control messages (register, proxy requests, heartbeats, tunnel notifications) |
+| **Control Connection** | A long-lived TCP connection from the client to the server, used only for control messages (register, config query, proxy requests, heartbeats, tunnel notifications) |
 | **Data Connection** | A new TCP connection initiated by the client upon receiving a `TunnelOpen` notification (connecting to the same server port), dedicated to data transport for a specific tunnel |
 | **Tunnel** | A pairing of a data connection and an external user connection; the server bridges them for bidirectional data forwarding |
 | **Proxy Mapping** | A port mapping rule: client local port ↔ server public port |
@@ -103,8 +103,8 @@ NAT traversal (also known as NAT piercing / reverse proxy) enables machines behi
 **Control Flow:**
 1. Client connects to the server's `bindPort`, establishing a control connection
 2. Client sends a `Register` message to complete identity registration
-3. Client sends a `ProxyRequest` to request port mapping
-4. Server replies with `ProxyResponse`, confirms the mapping, and starts listening on the corresponding port
+3. Client sends a `ConfigQuery` message to request proxy/rproxy rules
+4. Server looks up the rules for this `clientId`, starts listening on the corresponding proxy ports, and replies with `ConfigResponse` containing the rules
 5. Both sides send periodic `Heartbeat` messages for keepalive
 
 **Data Flow — Proxy Mode (External → Internal):**
@@ -176,31 +176,6 @@ natt/
 #### pkg/config — Configuration Loading
 
 ```
-type ServerConfig struct {
-    BindAddr   string // Control connection listen address, default "0.0.0.0"
-    BindPort   int    // Control connection listen port, default 7000
-    Token      string // Authentication token, optional
-    EncryptKey string // AES-256 encryption key (32-byte hex), optional
-    LogLevel   string // Log level, default "info"
-    LogFile    string // Log file path, optional
-}
-
-type ClientConfig struct {
-    ServerAddr string       // Server address (required)
-    ServerPort int          // Server port, default 7000
-    Token      string       // Authentication token, must match server
-    EncryptKey string       // AES-256 encryption key, must match server
-    LogLevel   string       // Log level, default "info"
-    LogFile    string       // Log file path, optional
-    Proxies    []ProxyRule  // Proxy mapping rules list (proxy mode)
-    RProxies   []RProxyRule // Reverse proxy mapping rules list (rproxy mode)
-
-    // The following optional fields can be overridden via config file
-    HeartbeatIntervalMs  int // Heartbeat interval (ms), default 45000
-    ReconnectBaseDelayMs int // Reconnect base delay (ms), default 500
-    ReconnectMaxDelayMs  int // Reconnect maximum delay (ms), default 60000
-}
-
 type ProxyRule struct {
     Name       string // Rule name, unique identifier
     LocalIP    string // Local service IP, default "127.0.0.1"
@@ -213,6 +188,36 @@ type RProxyRule struct {
     LocalPort  int    // Client listen port
     RemoteIP   string // Remote service IP (reachable from server)
     RemotePort int    // Remote service port
+}
+
+type ClientRules struct {
+    Proxies  []ProxyRule  // Proxy mapping rules for this client
+    RProxies []RProxyRule // Reverse proxy mapping rules for this client
+}
+
+type ServerConfig struct {
+    BindAddr   string                 // Control connection listen address, default "0.0.0.0"
+    BindPort   int                    // Control connection listen port, default 7000
+    Token      string                 // Authentication token, optional
+    EncryptKey string                 // AES-256 encryption key (32-byte hex), optional
+    LogLevel   string                 // Log level, default "info"
+    LogFile    string                 // Log file path, optional
+    Clients    map[string]ClientRules // Per-client proxy/rproxy rules, keyed by clientId
+}
+
+type ClientConfig struct {
+    ServerAddr string // Server address (required)
+    ServerPort int    // Server port, default 7000
+    Token      string // Authentication token, must match server
+    EncryptKey string // AES-256 encryption key, must match server
+    ClientID   string // Client identity, used by server to look up corresponding rules
+    LogLevel   string // Log level, default "info"
+    LogFile    string // Log file path, optional
+
+    // The following optional fields can be overridden via config file
+    HeartbeatIntervalMs  int // Heartbeat interval (ms), default 45000
+    ReconnectBaseDelayMs int // Reconnect base delay (ms), default 500
+    ReconnectMaxDelayMs  int // Reconnect maximum delay (ms), default 60000
 }
 ```
 
@@ -242,13 +247,13 @@ Provides an AES-256-GCM connection wrapper:
 |-----------|---------------|
 | **Server** | Main loop: listen on `bindPort` → accept connections → immediately wrap as CipherConn(encryptKey) → read first message, dispatch by message type to the control handler or data bridge |
 | **Registry** | Manages online clients (clientID → controlConn mapping), supports lookup, registration, and removal |
-| **ProxyManager** | Manages proxy and rproxy mappings + data bridging: handles `ProxyRequest` → listens on ports + waits for data connection pairing; handles `RProxyRequest` → stores `name → remoteIP:remotePort` mapping; upon accepting an external connection, assigns a `dataConnId` → sends `TunnelOpen` via the control connection → waits for the data connection; upon receiving a `DataConnect` handshake, dispatches based on the `mode` field — for `"proxy"` mode, matches the waiting external user connection by `dataConnId` and performs io.Copy; for `"rproxy"` mode, looks up the mapping by `rproxyName`, actively `Dial(remoteIP:remotePort)`, and performs io.Copy |
+| **ProxyManager** | Manages proxy and rproxy mappings + data bridging: stores per-client rules loaded from config; handles `ConfigQuery` → looks up rules by `clientId` and returns them; listens on ports + waits for data connection pairing; upon accepting an external connection, assigns a `dataConnId` → sends `TunnelOpen` via the control connection → waits for the data connection; upon receiving a `DataConnect` handshake, dispatches based on the `mode` field — for `"proxy"` mode, matches the waiting external user connection by `dataConnId` and performs io.Copy; for `"rproxy"` mode, looks up the mapping by `rproxyName`, actively `Dial(remoteIP:remotePort)`, and performs io.Copy |
 
 #### pkg/client — Client Core
 
 | Component | Responsibility |
 |-----------|---------------|
-| **Client** | Main loop: control connection setup → register → proxy request → message loop (handles TunnelOpen/TunnelClose/HeartbeatAck) → reconnect loop upon disconnection |
+| **Client** | Main loop: control connection setup → register → config query → message loop (handles TunnelOpen/TunnelClose/HeartbeatAck/ConfigResponse) → reconnect loop upon disconnection |
 | **LocalConnector** | Connects to local service (`localIP:localPort`) on demand; bridges data connection ↔ local connection |
 | **DataConnManager** | Manages data connections: upon receiving `TunnelOpen`, creates a new TCP connection to the server, sends `DataConnect` handshake, then bridges with the local connector |
 | **RProxy** | Listens on the local `localPort` for local application connections; upon receiving one, creates a new TCP connection to the server, sends `DataConnect{mode:"rproxy", rproxyName}`, bridges data connection ↔ local connection |
@@ -282,13 +287,15 @@ Provides an AES-256-GCM connection wrapper:
 | `0x02` | `TypeRegisterAck` | Server → Client | Registration acknowledgment, payload: `{success, error?}` |
 | `0x03` | `TypeHeartbeat` | Client → Server | Heartbeat request |
 | `0x04` | `TypeHeartbeatAck` | Server → Client | Heartbeat response |
-| `0x05` | `TypeProxyRequest` | Client → Server | Proxy request, payload: `{proxies: [{name, localIP, localPort, remotePort}]}` |
-| `0x06` | `TypeProxyResponse` | Server → Client | Proxy response, payload: `{results: [{name, success, remotePort?, error?}]}` |
+| `0x05` | `TypeProxyRequest` | Client → Server | Proxy request (legacy), payload: `{proxies: [{name, localIP, localPort, remotePort}]}` |
+| `0x06` | `TypeProxyResponse` | Server → Client | Proxy response (legacy), payload: `{results: [{name, success, remotePort?, error?}]}` |
 | `0x07` | `TypeTunnelOpen` | Server → Client | Tunnel open notification, payload: `{dataConnId, proxyName}` |
 | `0x08` | `TypeDataConnect` | Client → Server | Data connection handshake, payload: `{dataConnId, mode, rproxyName?}` |
 | `0x09` | `TypeTunnelClose` | Either → Peer | Tunnel close notification, payload: `{reason?}` |
-| `0x0A` | `TypeRProxyRequest` | Client → Server | RProxy setup request, payload: `{rproxies: [{name, remoteIP, remotePort}]}` |
-| `0x0B` | `TypeRProxyResponse` | Server → Client | RProxy setup response, payload: `{results: [{name, success, error?}]}` |
+| `0x0A` | `TypeRProxyRequest` | Client → Server | RProxy setup request (legacy), payload: `{rproxies: [{name, remoteIP, remotePort}]}` |
+| `0x0B` | `TypeRProxyResponse` | Server → Client | RProxy setup response (legacy), payload: `{results: [{name, success, error?}]}` |
+| `0x0C` | `TypeConfigQuery` | Client → Server | Config query — client requests proxy/rproxy rules after registration, payload: `{clientId}` |
+| `0x0D` | `TypeConfigResponse` | Server → Client | Config response — server returns rules for this client, payload: `{proxies: [...], rproxies: [...]}` |
 
 ### 4.3 Key Protocol Design Decisions
 
@@ -307,6 +314,12 @@ Provides an AES-256-GCM connection wrapper:
 - The control connection must be persistent to push `TunnelOpen` notifications in real-time
 - Data connections are created on demand, reducing resource consumption during idle periods
 
+**4. Why use ConfigQuery/ConfigResponse instead of client-side proxy configuration?**
+- **Centralized management**: All proxy mapping rules are defined on the server; no need to update configuration on each client machine
+- **Per-client distribution**: The server can return different rule sets for different `clientId` values, enabling fine-grained access control
+- **Simpler client configuration**: The client only needs to know the server address and its own identity; mapping rules are fetched automatically upon connection
+- **Hot update support** (future): The server can push updated configs without restarting clients
+
 ### 4.4 Message Flow Order Diagram
 
 ```
@@ -315,8 +328,8 @@ Control Connection:               Data Connection (per tunnel):
   ─────────────────────             ─────────────────────
   1. Register                       1. DataConnect
   2. RegisterAck                       {dataConnId, mode}
-  3. ProxyRequest
-  4. ProxyResponse
+  3. ConfigQuery
+  4. ConfigResponse
   5. Heartbeat (periodic)
   6. HeartbeatAck (periodic)
   7. TunnelOpen (pushed)
@@ -350,17 +363,27 @@ Client                                  Server
   │◄─── RegisterAck ─────────────────────│
   │  {success:true}                      │
   │                                       │
-  │── ProxyRequest ────────────────────►│
-  │  {proxies:[...]}                    │
+  │── ConfigQuery ─────────────────────►│
+  │  {clientId}                          │
   │                                       │
-  │  ┌─ Process mappings ────────────┐   │
+  │  ┌─ Look up client rules ────────┐   │
+  │  │  • Find Clients[clientId]     │   │
   │  │  • For each proxy:            │   │
   │  │    - Listen on remotePort     │   │
   │  │    - Register in ProxyManager │   │
   │  └────────────────────────────────┘   │
   │                                       │
-  │◄─── ProxyResponse ───────────────────│
-  │  {results:[{success:true,...}]}      │
+  │◄─── ConfigResponse ──────────────────│
+  │  {proxies:[...], rproxies:[...]}     │
+  │                                       │
+  │  ┌─ Apply received config ───────┐   │
+  │  │  • For each proxy:            │   │
+  │  │    - Record mapping for       │   │
+  │  │      data connection dispatch │   │
+  │  │  • For each rproxy:           │   │
+  │  │    - Start local listener on  │   │
+  │  │      localPort                │   │
+  │  └────────────────────────────────┘   │
   │                                       │
   │══ Heartbeat (every 45s) ═══════════►│
   │◄══ HeartbeatAck ════════════════════│
@@ -420,7 +443,7 @@ Client.Start()
   │    ├─ TCP keepalive (75s period)
   │    ├─ Wrap as CipherConn(encryptKey)
   │    ├─ Send Register → Receive RegisterAck
-  │    ├─ Send ProxyRequest → Receive ProxyResponse
+  │    ├─ Send ConfigQuery → Receive ConfigResponse
   │    ├─ Start heartbeat timer
   │    └─ Enter message loop (messageLoop)
   │
@@ -469,7 +492,7 @@ Client.Start()
        │    ├─ Immediately wrap as CipherConn(encryptKey)
        │    ├─ c.control = conn, c.active = true
        │    ├─ Send Register → Receive RegisterAck
-       │    ├─ Send ProxyRequest → Receive ProxyResponse
+       │    ├─ Send ConfigQuery → Receive ConfigResponse
        │    ├─ Start heartbeat timer
        │    └─ Enter message loop (messageLoop)
        │
@@ -477,7 +500,7 @@ Client.Start()
 
 Notes:
 - Reconnection has **no retry limit**; it retries indefinitely until the server recovers or the client is stopped via Stop()
-- Each reconnection goes through the full registration and proxy request flow
+- Each reconnection goes through the full registration and config query flow
 - Data connection disconnection does not affect the control connection. When the server detects a data connection drop, it sends a TunnelClose notification via the control connection to instruct the client to close the corresponding local connection
 ```
 
@@ -606,7 +629,44 @@ SIGINT / SIGTERM received
   "bindPort": 7000,
   "token": "your-secret-token",
   "encryptKey": "7f3b8c1a2d5e9f064a7b8c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0",
-  "logLevel": "info"
+  "logLevel": "info",
+  "clients": {
+    "client-a": {
+      "proxies": [
+        {
+          "name": "ssh",
+          "localIP": "127.0.0.1",
+          "localPort": 22,
+          "remotePort": 6000
+        },
+        {
+          "name": "web",
+          "localIP": "127.0.0.1",
+          "localPort": 8080,
+          "remotePort": 8080
+        }
+      ],
+      "rproxies": [
+        {
+          "name": "db-tunnel",
+          "localPort": 3307,
+          "remoteIP": "10.0.0.50",
+          "remotePort": 3306
+        }
+      ]
+    },
+    "client-b": {
+      "proxies": [
+        {
+          "name": "mysql",
+          "localIP": "192.168.1.50",
+          "localPort": 3306,
+          "remotePort": 13306
+        }
+      ],
+      "rproxies": []
+    }
+  }
 }
 ```
 
@@ -616,6 +676,17 @@ SIGINT / SIGTERM received
 - `encryptKey`: AES-256 key (32-byte hex-encoded), optional (leave empty to disable encryption), can be generated via `natt keygen`
 - `logLevel`: Log level `debug|info|warn|error`, default `"info"`
 - `logFile`: Log file path, optional (leave empty for stdout)
+- `clients`: Per-client proxy and rproxy rule definitions, keyed by `clientId` (the `clientId` sent in the `Register` message)
+  - `proxies[]`: Proxy mapping rules for this client
+    - `name`: Rule name (unique per client)
+    - `localIP`: Client-local service IP, default `"127.0.0.1"`
+    - `localPort`: Client-local service port
+    - `remotePort`: Server-exposed port (`0` = random assignment)
+  - `rproxies[]`: Reverse proxy mapping rules for this client
+    - `name`: Rule name (unique per client)
+    - `localPort`: Client listen port
+    - `remoteIP`: Remote service IP (reachable from server)
+    - `remotePort`: Remote service port
 
 ### 7.2 Client Configuration
 
@@ -625,64 +696,23 @@ SIGINT / SIGTERM received
   "serverPort": 7000,
   "token": "your-secret-token",
   "encryptKey": "7f3b8c1a2d5e9f064a7b8c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0",
+  "clientId": "client-a",
   "logLevel": "info",
   "logFile": "",
   "heartbeatIntervalMs": 45000,
   "reconnectBaseDelayMs": 500,
-  "reconnectMaxDelayMs": 60000,
-  "proxies": [
-    {
-      "name": "ssh",
-      "localIP": "127.0.0.1",
-      "localPort": 22,
-      "remotePort": 6000
-    },
-    {
-      "name": "web",
-      "localIP": "127.0.0.1",
-      "localPort": 8080,
-      "remotePort": 8080
-    },
-    {
-      "name": "mysql",
-      "localIP": "192.168.1.50",
-      "localPort": 3306,
-      "remotePort": 13306
-    }
-  ],
-  "rproxies": [
-    {
-      "name": "db-tunnel",
-      "localPort": 3307,
-      "remoteIP": "10.0.0.50",
-      "remotePort": 3306
-    },
-    {
-      "name": "internal-api",
-      "localPort": 8081,
-      "remoteIP": "192.168.1.100",
-      "remotePort": 80
-    }
-  ]
+  "reconnectMaxDelayMs": 60000
 }
 ```
 
 - `serverAddr`: Server address (required)
 - `serverPort`: Server port, default `7000`
 - `token` / `encryptKey`: Authentication and encryption keys, must match the server
+- `clientId`: Client identity, used by the server to look up the corresponding proxy/rproxy rules (必须与 server.json 中 `clients` 的 key 对应)
 - `heartbeatIntervalMs`: Heartbeat interval (ms), default `45000`
 - `reconnectBaseDelayMs`: Reconnect base delay (ms), default `500`
 - `reconnectMaxDelayMs`: Reconnect maximum delay (ms), default `60000`
-- `proxies[]`: Proxy mapping rules list (proxy mode)
-  - `name`: Rule name (unique identifier)
-  - `localIP`: Local service IP, default `"127.0.0.1"`
-  - `localPort`: Local service port
-  - `remotePort`: Server-exposed port (`0` = random assignment)
-- `rproxies[]`: Reverse proxy mapping rules list (rproxy mode)
-  - `name`: Rule name (unique identifier)
-  - `localPort`: Client listen port
-  - `remoteIP`: Remote service IP (reachable from server)
-  - `remotePort`: Remote service port
+- **Note**: Proxy and reverse proxy rules are no longer configured in the client config. They are defined on the server (see `clients` in [Server Configuration](#71-server-configuration)) and fetched automatically by the client after registration via the `ConfigQuery` message.
 
 ### 7.3 Command-Line Arguments
 
@@ -752,12 +782,16 @@ go vet ./pkg/... ./cmd/...                           # Code check (static analys
 
 ```
 1. Start Server locally (bindAddr="127.0.0.1", bindPort=0 → random port)
-2. Start Client to connect to the above Server
-3. Client requests a proxy mapping (localIP="127.0.0.1", localPort=22, remotePort=0)
-4. Server assigns remotePort (random port)
-5. External connection to remotePort → verify data reaches client's local port 22
-6. Disconnect Client → verify Server cleans up the proxy port
-7. Client reconnects → verify re-registration and proxy restoration
+   - Server config includes client rules for "client-a": proxy(localPort=22, remotePort=0)
+2. Start Client (clientId="client-a") to connect to the above Server
+3. Client sends Register → receives RegisterAck
+4. Client sends ConfigQuery → receives ConfigResponse with proxy rules for "client-a"
+5. Client applies received config; Server listens on assigned remotePort
+6. External connection to remotePort → verify data reaches client's local port 22
+7. Disconnect Client → verify Server cleans up the proxy port
+8. Client reconnects → verify re-registration, config re-query, and proxy restoration
+9. [Multi-client test] Start a second Client (clientId="client-b") with different rules
+   → verify each client receives its own rule set and proxy ports
 ```
 
 ---
