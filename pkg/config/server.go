@@ -8,12 +8,13 @@ import (
 
 // ServerConfig is the configuration for the NAT server.
 type ServerConfig struct {
-	BindAddr   string `json:"bindAddr"`
-	BindPort   int    `json:"bindPort"`
-	Token      string `json:"token"`
-	EncryptKey string `json:"encryptKey"`
-	LogLevel   string `json:"logLevel"`
-	LogFile    string `json:"logFile"`
+	BindAddr   string                    `json:"bindAddr"`
+	BindPort   int                       `json:"bindPort"`
+	Token      string                    `json:"token"`
+	EncryptKey string                    `json:"encryptKey"`
+	LogLevel   string                    `json:"logLevel"`
+	LogFile    string                    `json:"logFile"`
+	Clients    map[string]ClientRules    `json:"clients"`
 }
 
 // DefaultServerConfig returns a ServerConfig with sensible defaults.
@@ -22,6 +23,7 @@ func DefaultServerConfig() ServerConfig {
 		BindAddr: "0.0.0.0",
 		BindPort: 7000,
 		LogLevel: "info",
+		Clients:  make(map[string]ClientRules),
 	}
 }
 
@@ -47,4 +49,15 @@ func (c *ServerConfig) validate() error {
 		return fmt.Errorf("bindPort %d out of range", c.BindPort)
 	}
 	return nil
+}
+
+// ClientRulesFor returns the proxy/rproxy rules for the given clientId.
+// Returns an empty ClientRules if the clientId is not found.
+func (c *ServerConfig) ClientRulesFor(clientID string) ClientRules {
+	if c.Clients != nil {
+		if rules, ok := c.Clients[clientID]; ok {
+			return rules
+		}
+	}
+	return ClientRules{}
 }
