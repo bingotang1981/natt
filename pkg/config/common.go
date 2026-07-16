@@ -25,6 +25,12 @@ type RProxyRule struct {
 	RemotePort int    `json:"remotePort"`
 }
 
+// ClientRules defines the set of proxy rules for a specific client.
+type ClientRules struct {
+	Proxies  []ProxyRule  `json:"proxies"`
+	RProxies []RProxyRule `json:"rproxies"`
+}
+
 // DecryptKey decodes a hex-encoded AES-256 key. Returns nil if the key is empty.
 func DecryptKey(hexKey string) ([]byte, error) {
 	if hexKey == "" {
