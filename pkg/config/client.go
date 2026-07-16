@@ -11,14 +11,13 @@ import (
 
 // ClientConfig is the configuration for the NAT client.
 type ClientConfig struct {
-	ServerAddr string       `json:"serverAddr"`
-	ServerPort int          `json:"serverPort"`
-	Token      string       `json:"token"`
-	EncryptKey string       `json:"encryptKey"`
-	LogLevel   string       `json:"logLevel"`
-	LogFile    string       `json:"logFile"`
-	Proxies    []ProxyRule  `json:"proxies"`
-	RProxies   []RProxyRule `json:"rproxies"`
+	ServerAddr string `json:"serverAddr"`
+	ServerPort int    `json:"serverPort"`
+	Token      string `json:"token"`
+	EncryptKey string `json:"encryptKey"`
+	ClientID   string `json:"clientId"`
+	LogLevel   string `json:"logLevel"`
+	LogFile    string `json:"logFile"`
 
 	// Optional overrides with defaults
 	HeartbeatIntervalMs  int `json:"heartbeatIntervalMs"`
@@ -80,31 +79,6 @@ func (c *ClientConfig) validate() error {
 	}
 	if c.ServerPort < 1 || c.ServerPort > 65535 {
 		return fmt.Errorf("serverPort %d out of range", c.ServerPort)
-	}
-	for _, p := range c.Proxies {
-		if p.Name == "" {
-			return fmt.Errorf("proxy name is required")
-		}
-		if p.LocalPort < 1 || p.LocalPort > 65535 {
-			return fmt.Errorf("proxy %s: localPort %d out of range", p.Name, p.LocalPort)
-		}
-		if p.RemotePort < 1 || p.RemotePort > 65535 {
-			return fmt.Errorf("proxy %s: remotePort %d out of range", p.Name, p.RemotePort)
-		}
-	}
-	for _, r := range c.RProxies {
-		if r.Name == "" {
-			return fmt.Errorf("rproxy name is required")
-		}
-		if r.LocalPort < 1 || r.LocalPort > 65535 {
-			return fmt.Errorf("rproxy %s: localPort %d out of range", r.Name, r.LocalPort)
-		}
-		if r.RemoteIP == "" {
-			return fmt.Errorf("rproxy %s: remoteIP is required", r.Name)
-		}
-		if r.RemotePort < 1 || r.RemotePort > 65535 {
-			return fmt.Errorf("rproxy %s: remotePort %d out of range", r.Name, r.RemotePort)
-		}
 	}
 	return nil
 }
