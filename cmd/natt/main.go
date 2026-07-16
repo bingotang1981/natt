@@ -146,7 +146,6 @@ func runClient(args []string) {
 
 	slog.Info("client starting",
 		"server", net.JoinHostPort(cfg.ServerAddr, strconv.Itoa(cfg.ServerPort)),
-		"proxies", len(cfg.Proxies),
 	)
 
 	if err := cli.Run(); err != nil {
