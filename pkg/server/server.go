@@ -279,6 +279,85 @@ func (s *Server) handleControlConn(conn net.Conn, msg *protocol.Message) {
 				Type: protocol.TypeProxyResponse, Payload: respPayload,
 			})
 
+		case protocol.TypeConfigQuery:
+			slog.Info("config query from client", "clientId", reg.ClientID)
+			rules := s.cfg.ClientRulesFor(reg.ClientID)
+
+			// Start proxy listeners on the server side
+			type configProxyResult struct {
+				Name       string `json:"name"`
+				LocalIP    string `json:"localIP"`
+				LocalPort  int    `json:"localPort"`
+				RemotePort int    `json:"remotePort"`
+				Success    bool   `json:"success"`
+				Error      string `json:"error,omitempty"`
+			}
+			var proxyResults []configProxyResult
+			for _, p := range rules.Proxies {
+				ps := ProxyState{
+					Name:       p.Name,
+					LocalIP:    p.LocalIP,
+					LocalPort:  p.LocalPort,
+					RemotePort: p.RemotePort,
+				}
+				actualPort, err := s.proxyManager.StartProxy(ps, conn, reg.ClientID)
+				if err != nil {
+					slog.Warn("start proxy failed", "name", p.Name, "error", err)
+					proxyResults = append(proxyResults, configProxyResult{
+						Name: p.Name, LocalIP: p.LocalIP, LocalPort: p.LocalPort,
+						RemotePort: p.RemotePort, Success: false, Error: err.Error(),
+					})
+				} else {
+					slog.Info("proxy started", "name", p.Name, "port", actualPort)
+					proxyResults = append(proxyResults, configProxyResult{
+						Name: p.Name, LocalIP: p.LocalIP, LocalPort: p.LocalPort,
+						RemotePort: actualPort, Success: true,
+					})
+				}
+			}
+
+			// Register rproxy mappings on the server side
+			type configRProxyResult struct {
+				Name       string `json:"name"`
+				LocalPort  int    `json:"localPort"`
+				RemoteIP   string `json:"remoteIP"`
+				RemotePort int    `json:"remotePort"`
+				Success    bool   `json:"success"`
+				Error      string `json:"error,omitempty"`
+			}
+			var rproxyResults []configRProxyResult
+			for _, r := range rules.RProxies {
+				rs := RProxyState{
+					Name:       r.Name,
+					RemoteIP:   r.RemoteIP,
+					RemotePort: r.RemotePort,
+					ClientID:   reg.ClientID,
+				}
+				if err := s.proxyManager.StartRProxy(rs); err != nil {
+					slog.Warn("start rproxy failed", "name", r.Name, "error", err)
+					rproxyResults = append(rproxyResults, configRProxyResult{
+						Name: r.Name, LocalPort: r.LocalPort,
+						RemoteIP: r.RemoteIP, RemotePort: r.RemotePort,
+						Success: false, Error: err.Error(),
+					})
+				} else {
+					slog.Info("rproxy registered", "name", r.Name)
+					rproxyResults = append(rproxyResults, configRProxyResult{
+						Name: r.Name, LocalPort: r.LocalPort,
+						RemoteIP: r.RemoteIP, RemotePort: r.RemotePort,
+						Success: true,
+					})
+				}
+			}
+
+			respPayload, _ := json.Marshal(map[string]interface{}{
+				"proxies":  proxyResults,
+				"rproxies": rproxyResults,
+			})
+			protocol.WriteMessage(conn, &protocol.Message{
+				Type: protocol.TypeConfigResponse, Payload: respPayload,
+			})
+
 		case protocol.TypeRProxyRequest:
 			var rpReq struct {
 				RProxies []struct {
