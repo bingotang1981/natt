@@ -21,7 +21,7 @@ type Client struct {
 	cfg     config.ClientConfig
 	encKey  []byte
 	control net.Conn
-	proxies []config.ProxyRule
+	proxies []config.ProxyRule // received from server via ConfigResponse
 	dataMgr *DataConnManager
 
 	heartStop chan struct{}
@@ -50,7 +50,6 @@ func New(cfg config.ClientConfig) (*Client, error) {
 	return &Client{
 		cfg:             cfg,
 		encKey:          encKey,
-		proxies:         cfg.Proxies,
 		dataMgr:         NewDataConnManager(cfg.ServerAddr, cfg.ServerPort, encKey),
 		tunnels:         make(map[string]context.CancelFunc),
 		rproxyListeners: make([]*RProxyListener, 0),
@@ -133,19 +132,41 @@ func (c *Client) connectAndServe() error {
 	}
 	slog.Info("registered with server")
 
-	// Send proxy request
-	if err := c.requestProxies(conn); err != nil {
+	// Query config from server (replaces local proxy/rproxy configuration)
+	rules, err := c.configQuery(conn)
+	if err != nil {
 		return err
 	}
-	slog.Info("proxy request sent", "count", len(c.proxies))
-
-	// Send rproxy request and start local listeners
-	if len(c.cfg.RProxies) > 0 {
-		if err := c.requestRProxies(conn); err != nil {
-			return err
+	// Convert received proxies to config.ProxyRule for tunnel lookup
+	c.proxies = make([]config.ProxyRule, 0, len(rules.Proxies))
+	for _, p := range rules.Proxies {
+		if p.Success {
+			c.proxies = append(c.proxies, config.ProxyRule{
+				Name:       p.Name,
+				LocalIP:    p.LocalIP,
+				LocalPort:  p.LocalPort,
+				RemotePort: p.RemotePort,
+			})
 		}
-		slog.Info("rproxy request sent", "count", len(c.cfg.RProxies))
-		if err := c.startRProxyListeners(conn); err != nil {
+	}
+	slog.Info("config received from server",
+		"proxies", len(rules.Proxies),
+		"rproxies", len(rules.RProxies))
+
+	// Start rproxy local listeners based on server-provided config
+	if len(rules.RProxies) > 0 {
+		var rproxyRules []config.RProxyRule
+		for _, r := range rules.RProxies {
+			if r.Success {
+				rproxyRules = append(rproxyRules, config.RProxyRule{
+					Name:       r.Name,
+					LocalPort:  r.LocalPort,
+					RemoteIP:   r.RemoteIP,
+					RemotePort: r.RemotePort,
+				})
+			}
+		}
+		if err := c.startRProxyListeners(conn, rproxyRules); err != nil {
 			return err
 		}
 	}
@@ -158,8 +179,12 @@ func (c *Client) connectAndServe() error {
 }
 
 func (c *Client) register(conn net.Conn) error {
+	clientID := c.cfg.ClientID
+	if clientID == "" {
+		clientID = fmt.Sprintf("client-%d", time.Now().UnixNano())
+	}
 	payload, _ := json.Marshal(map[string]string{
-		"clientId": fmt.Sprintf("client-%d", time.Now().UnixNano()),
+		"clientId": clientID,
 		"token":    c.cfg.Token,
 		"version":  "2.0.0",
 	})
@@ -187,60 +212,75 @@ func (c *Client) register(conn net.Conn) error {
 	return nil
 }
 
-func (c *Client) requestProxies(conn net.Conn) error {
-	type proxyItem struct {
-		Name       string `json:"name"`
-		LocalIP    string `json:"localIP"`
-		LocalPort  int    `json:"localPort"`
-		RemotePort int    `json:"remotePort"`
+func (c *Client) configQuery(conn net.Conn) (*configQueryResult, error) {
+	clientID := c.cfg.ClientID
+	if clientID == "" {
+		clientID = fmt.Sprintf("client-%d", time.Now().UnixNano())
 	}
-	var items []proxyItem
-	for _, p := range c.proxies {
-		ip := p.LocalIP
-		if ip == "" {
-			ip = "127.0.0.1"
-		}
-		items = append(items, proxyItem{
-			Name: p.Name, LocalIP: ip,
-			LocalPort: p.LocalPort, RemotePort: p.RemotePort,
-		})
-	}
-	payload, _ := json.Marshal(map[string]interface{}{"proxies": items})
-	msg := &protocol.Message{Type: protocol.TypeProxyRequest, Payload: payload}
+	payload, _ := json.Marshal(map[string]string{
+		"clientId": clientID,
+	})
+	msg := &protocol.Message{Type: protocol.TypeConfigQuery, Payload: payload}
 	if err := protocol.WriteMessage(conn, msg); err != nil {
-		return fmt.Errorf("send ProxyRequest: %w", err)
+		return nil, fmt.Errorf("send ConfigQuery: %w", err)
 	}
 
 	resp, err := protocol.ReadMessage(conn)
 	if err != nil {
-		return fmt.Errorf("read ProxyResponse: %w", err)
+		return nil, fmt.Errorf("read ConfigResponse: %w", err)
 	}
-	if resp.Type != protocol.TypeProxyResponse {
-		return fmt.Errorf("expected ProxyResponse, got 0x%02X", byte(resp.Type))
+	if resp.Type != protocol.TypeConfigResponse {
+		return nil, fmt.Errorf("expected ConfigResponse, got 0x%02X", byte(resp.Type))
 	}
 
-	var result struct {
-		Results []struct {
-			Name       string `json:"name"`
-			Success    bool   `json:"success"`
-			RemotePort int    `json:"remotePort"`
-			Error      string `json:"error,omitempty"`
-		} `json:"results"`
+	var result configQueryResult
+	if err := json.Unmarshal(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("parse ConfigResponse: %w", err)
 	}
-	json.Unmarshal(resp.Payload, &result)
-	var failed []string
-	for _, r := range result.Results {
-		if r.Success {
-			slog.Info("proxy active", "name", r.Name, "port", r.RemotePort)
+
+	// Log results
+	for _, p := range result.Proxies {
+		if p.Success {
+			slog.Info("proxy active", "name", p.Name, "port", p.RemotePort)
 		} else {
-			slog.Warn("proxy failed", "name", r.Name, "error", r.Error)
-			failed = append(failed, r.Name)
+			slog.Warn("proxy failed", "name", p.Name, "error", p.Error)
 		}
 	}
-	if len(failed) > 0 {
-		return fmt.Errorf("proxy(s) rejected: %v", failed)
+	for _, r := range result.RProxies {
+		if r.Success {
+			slog.Info("rproxy registered", "name", r.Name, "remote", net.JoinHostPort(r.RemoteIP, strconv.Itoa(r.RemotePort)))
+		} else {
+			slog.Warn("rproxy failed", "name", r.Name, "error", r.Error)
+		}
 	}
-	return nil
+
+	return &result, nil
+}
+
+// receivedProxy describes a proxy rule received from the server ConfigResponse.
+type receivedProxy struct {
+	Name       string `json:"name"`
+	LocalIP    string `json:"localIP"`
+	LocalPort  int    `json:"localPort"`
+	RemotePort int    `json:"remotePort"`
+	Success    bool   `json:"success"`
+	Error      string `json:"error,omitempty"`
+}
+
+// receivedRProxy describes an rproxy rule received from the server ConfigResponse.
+type receivedRProxy struct {
+	Name       string `json:"name"`
+	LocalPort  int    `json:"localPort"`
+	RemoteIP   string `json:"remoteIP"`
+	RemotePort int    `json:"remotePort"`
+	Success    bool   `json:"success"`
+	Error      string `json:"error,omitempty"`
+}
+
+// configQueryResult is the parsed ConfigResponse payload.
+type configQueryResult struct {
+	Proxies  []receivedProxy  `json:"proxies"`
+	RProxies []receivedRProxy `json:"rproxies"`
 }
 
 func (c *Client) messageLoop(conn net.Conn) error {
@@ -329,61 +369,9 @@ func (c *Client) closeAllTunnels() {
 	slog.Debug("all tunnels closed")
 }
 
-// requestRProxies sends RProxyRequest for all configured rproxy rules.
-func (c *Client) requestRProxies(conn net.Conn) error {
-	type rproxyItem struct {
-		Name       string `json:"name"`
-		LocalPort  int    `json:"localPort"`
-		RemoteIP   string `json:"remoteIP"`
-		RemotePort int    `json:"remotePort"`
-	}
-	var items []rproxyItem
-	for _, r := range c.cfg.RProxies {
-		items = append(items, rproxyItem{
-			Name: r.Name, LocalPort: r.LocalPort,
-			RemoteIP: r.RemoteIP, RemotePort: r.RemotePort,
-		})
-	}
-	payload, _ := json.Marshal(map[string]interface{}{"rproxies": items})
-	msg := &protocol.Message{Type: protocol.TypeRProxyRequest, Payload: payload}
-	if err := protocol.WriteMessage(conn, msg); err != nil {
-		return fmt.Errorf("send RProxyRequest: %w", err)
-	}
-
-	resp, err := protocol.ReadMessage(conn)
-	if err != nil {
-		return fmt.Errorf("read RProxyResponse: %w", err)
-	}
-	if resp.Type != protocol.TypeRProxyResponse {
-		return fmt.Errorf("expected RProxyResponse, got 0x%02X", byte(resp.Type))
-	}
-
-	var result struct {
-		Results []struct {
-			Name    string `json:"name"`
-			Success bool   `json:"success"`
-			Error   string `json:"error,omitempty"`
-		} `json:"results"`
-	}
-	json.Unmarshal(resp.Payload, &result)
-	var failed []string
-	for _, r := range result.Results {
-		if r.Success {
-			slog.Info("rproxy registered", "name", r.Name)
-		} else {
-			slog.Warn("rproxy failed", "name", r.Name, "error", r.Error)
-			failed = append(failed, r.Name)
-		}
-	}
-	if len(failed) > 0 {
-		return fmt.Errorf("rproxy(s) rejected: %v", failed)
-	}
-	return nil
-}
-
 // startRProxyListeners starts local TCP listeners for each rproxy rule.
-func (c *Client) startRProxyListeners(conn net.Conn) error {
-	for _, r := range c.cfg.RProxies {
+func (c *Client) startRProxyListeners(conn net.Conn, rproxies []config.RProxyRule) error {
+	for _, r := range rproxies {
 		rp, err := NewRProxyListener(r.Name, r.LocalPort, r.RemoteIP, r.RemotePort,
 			c.cfg.ServerAddr, c.cfg.ServerPort, c.encKey)
 		if err != nil {
