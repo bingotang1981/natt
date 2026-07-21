@@ -205,6 +205,16 @@ func (s *Server) handleControlConn(conn net.Conn, msg *protocol.Message) {
 		ControlConn: conn,
 		Token:       reg.Token,
 	}
+
+	// Evict any existing connection with the same clientId to prevent
+	// resource conflicts (port already in use, rproxy already exists, etc.)
+	if oldInfo, exists := s.registry.Get(reg.ClientID); exists {
+		s.registry.Remove(reg.ClientID)
+		s.proxyManager.StopClientProxies(reg.ClientID)
+		oldInfo.ControlConn.Close()
+		slog.Info("evicted old connection", "clientId", reg.ClientID)
+	}
+
 	s.registry.Register(info)
 	slog.Info("client registered", "clientId", reg.ClientID, "remote", conn.RemoteAddr())
 
