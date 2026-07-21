@@ -349,7 +349,13 @@ func (c *Client) messageLoop(conn net.Conn) error {
 			// Heartbeat acknowledged; reset timeout counter (implicit)
 
 		case protocol.TypeError:
-			slog.Warn("server error", "payload", string(msg.Payload))
+			var errResp struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			json.Unmarshal(msg.Payload, &errResp)
+			slog.Warn("server error", "code", errResp.Code, "message", errResp.Message)
+			return fmt.Errorf("server error: %s - %s", errResp.Code, errResp.Message)
 
 		default:
 			slog.Debug("unhandled message", "type", msg.Type)
