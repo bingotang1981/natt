@@ -211,6 +211,15 @@ func (s *Server) handleControlConn(conn net.Conn, msg *protocol.Message) {
 	if oldInfo, exists := s.registry.Get(reg.ClientID); exists {
 		s.registry.Remove(reg.ClientID)
 		s.proxyManager.StopClientProxies(reg.ClientID)
+		// Notify the old client before closing its connection so it can
+		// detect the eviction promptly instead of waiting for TCP timeout.
+		errPayload, _ := json.Marshal(map[string]string{
+			"code":    "EVICTED",
+			"message": "another client connected with the same clientId",
+		})
+		protocol.WriteMessage(oldInfo.ControlConn, &protocol.Message{
+			Type: protocol.TypeError, Payload: errPayload,
+		})
 		oldInfo.ControlConn.Close()
 		slog.Info("evicted old connection", "clientId", reg.ClientID)
 	}
