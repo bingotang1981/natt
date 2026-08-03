@@ -245,6 +245,7 @@ Options:
 |----------|----------|
 | Server not started | Client exponential backoff reconnect (0.5s → 1.5s → 2.25s → ... → 60s cap) |
 | Network interruption | Heartbeat timeout detection (3× interval without reply = disconnect) |
+| Proxy/rproxy setup failure on reconnect | ConfigResponse contains failed rules (port in use / rproxy already exists) → client waits 3s then reconnects |
 | Key mismatch | GCM authentication failure, immediate connection close + alert |
 | Data connection drop | Does not affect the control connection; only the corresponding tunnel is closed |
 | Graceful shutdown | SIGINT/SIGTERM → close data connections → notify peer → close control connection |
