@@ -137,6 +137,19 @@ func (c *Client) connectAndServe() error {
 	if err != nil {
 		return err
 	}
+
+	// If any proxy/rproxy rule failed to start, the server likely still has
+	// stale resources from a previous connection (port in use, rproxy already
+	// exists). Wait a few seconds so the server finishes cleaning up before
+	// reconnecting — otherwise the retry fails immediately.
+	if hasFailedRules(rules) {
+		slog.Warn("some proxy/rproxy rules failed to start; waiting before reconnect",
+			"delay", configRetryDelay)
+		time.Sleep(configRetryDelay)
+		return fmt.Errorf("proxy/rproxy setup failed: %d proxy, %d rproxy errors",
+			failedCount(rules.Proxies), failedCount(rules.RProxies))
+	}
+
 	// Convert received proxies to config.ProxyRule for tunnel lookup
 	c.proxies = make([]config.ProxyRule, 0, len(rules.Proxies))
 	for _, p := range rules.Proxies {
@@ -267,6 +280,9 @@ type receivedProxy struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// GetSuccess implements the failedRule interface.
+func (p receivedProxy) GetSuccess() bool { return p.Success }
+
 // receivedRProxy describes an rproxy rule received from the server ConfigResponse.
 type receivedRProxy struct {
 	Name       string `json:"name"`
@@ -277,10 +293,34 @@ type receivedRProxy struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// GetSuccess implements the failedRule interface.
+func (r receivedRProxy) GetSuccess() bool { return r.Success }
+
 // configQueryResult is the parsed ConfigResponse payload.
 type configQueryResult struct {
 	Proxies  []receivedProxy  `json:"proxies"`
 	RProxies []receivedRProxy `json:"rproxies"`
+}
+
+// configRetryDelay is how long to wait before reconnecting when proxy/rproxy
+// rules fail to start (the server may still be cleaning up stale resources).
+const configRetryDelay = 3 * time.Second
+
+// hasFailedRules reports whether any proxy or rproxy rule in the ConfigResponse
+// failed to start on the server side.
+func hasFailedRules(r *configQueryResult) bool {
+	return failedCount(r.Proxies) > 0 || failedCount(r.RProxies) > 0
+}
+
+// failedCount returns the number of failed rules in a list.
+func failedCount[T interface{ GetSuccess() bool }](rules []T) int {
+	n := 0
+	for _, r := range rules {
+		if !r.GetSuccess() {
+			n++
+		}
+	}
+	return n
 }
 
 func (c *Client) messageLoop(conn net.Conn) error {
