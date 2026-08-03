@@ -444,6 +444,11 @@ Client.Start()
   │    ├─ Wrap as CipherConn(encryptKey)
   │    ├─ Send Register → Receive RegisterAck
   │    ├─ Send ConfigQuery → Receive ConfigResponse
+  │    │    └─ If any proxy/rproxy rule failed to start
+  │    │         (port in use / rproxy already exists):
+  │    │         ├─ slog.Warn + wait ConfigRetryDelay (3s)
+  │    │         │   for server to finish cleaning stale resources
+  │    │         └─ Return error → enter reconnection loop
   │    ├─ Start heartbeat timer
   │    └─ Enter message loop (messageLoop)
   │
@@ -493,6 +498,8 @@ Client.Start()
        │    ├─ c.control = conn, c.active = true
        │    ├─ Send Register → Receive RegisterAck
        │    ├─ Send ConfigQuery → Receive ConfigResponse
+       │    │    └─ If any proxy/rproxy rule failed to start:
+       │    │         wait ConfigRetryDelay (3s) → return error → retry
        │    ├─ Start heartbeat timer
        │    └─ Enter message loop (messageLoop)
        │
@@ -501,6 +508,7 @@ Client.Start()
 Notes:
 - Reconnection has **no retry limit**; it retries indefinitely until the server recovers or the client is stopped via Stop()
 - Each reconnection goes through the full registration and config query flow
+- If the ConfigResponse contains failed proxy/rproxy rules (e.g. "remote port already in use", "rproxy already exists"), the server is likely still cleaning up resources from the previous connection. The client waits `ConfigRetryDelay` (3s) before reconnecting to avoid immediate retry failure
 - Data connection disconnection does not affect the control connection. When the server detects a data connection drop, it sends a TunnelClose notification via the control connection to instruct the client to close the corresponding local connection
 ```
 
@@ -552,6 +560,7 @@ Local App                  Client                          Server               
 |----------|-----------------|----------|
 | Server not started / crash | TCP connection timeout / EOF | Client retries indefinitely (0.5s → ×1.5 → 60s cap) until client is stopped |
 | Network interruption | TCP keepalive / heartbeat write failure / read timeout | The earliest of the three detection methods triggers reconnection (as fast as 45s); on disconnect, close all active tunnels, re-register and re-request proxies after reconnection |
+| Proxy/rproxy setup failure on reconnect | ConfigResponse contains failed rules (port in use / rproxy already exists) | Client waits `ConfigRetryDelay` (3s) for the server to finish cleaning up stale resources, then reconnects |
 | Long-term network outage | Read timeout (HeartbeatInterval × 3) | Infinite reconnection at max backoff interval of 60s; auto-rebuilds proxy mappings on recovery |
 | DNS resolution failure | net.Dial returns error | Log alert, retry with backoff strategy |
 | DataConnect handshake timeout | Server waits 10s without DataConnect | Close external user connection, release dataConnId resources |
@@ -790,8 +799,12 @@ go vet ./pkg/... ./cmd/...                           # Code check (static analys
 6. External connection to remotePort → verify data reaches client's local port 22
 7. Disconnect Client → verify Server cleans up the proxy port
 8. Client reconnects → verify re-registration, config re-query, and proxy restoration
-9. [Multi-client test] Start a second Client (clientId="client-b") with different rules
-   → verify each client receives its own rule set and proxy ports
+9. [Delayed-retry test] While Client is connected, start a second Client with the same clientId
+   → first Client receives TypeError(EVICTED) and reconnects immediately
+   → if the reconnect's ConfigResponse contains failed rules (port still in use),
+     verify the client waits ~3s (ConfigRetryDelay) before the next reconnect attempt
+10. [Multi-client test] Start a second Client (clientId="client-b") with different rules
+    → verify each client receives its own rule set and proxy ports
 ```
 
 ---
