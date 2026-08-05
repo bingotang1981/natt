@@ -33,7 +33,7 @@ NAT traversal (also known as NAT piercing / reverse proxy) enables machines behi
 
 - **Lightweight**: Single binary deployment, no external dependencies
 - **Reliable**: Automatic reconnection on disconnect, heartbeat keepalive, automatic resource cleanup
-- **Secure**: Token-based authentication, optional TLS encryption
+- **Secure**: Token-based authentication, optional AES-256-GCM encryption (pre-shared key)
 - **Easy to use**: Simple configuration file, comprehensive command-line arguments
 
 ### 1.3 Glossary
@@ -105,17 +105,17 @@ NAT traversal (also known as NAT piercing / reverse proxy) enables machines behi
 2. Client sends a `Register` message to complete identity registration
 3. Client sends a `ConfigQuery` message to request proxy/rproxy rules
 4. Server looks up the rules for this `clientId`, starts listening on the corresponding proxy ports, and replies with `ConfigResponse` containing the rules
-5. Both sides send periodic `Heartbeat` messages for keepalive
+5. Client sends periodic `Heartbeat` messages; the server replies with `HeartbeatAck` for keepalive
 
 **Data Flow — Proxy Mode (External → Internal):**
 1. An external user connects to the server's `remotePort`
 2. The server accepts the connection, assigns a unique `dataConnId`, and sends `TunnelOpen{dataConnId, proxyName}` to the client over the **control connection**
 3. Upon receiving it, the client **initiates a new TCP connection** to the server's `bindPort` (same port as the control connection)
-4. The client sends a `DataConnect{dataConnId, mode:"proxy"}` handshake message on this new connection
+4. The client sends a `DataConnect{dataConnId}` handshake message on this new connection
 5. The server receives `DataConnect` and pairs this data connection with the previously waiting external user connection
 6. The server's **data bridge** performs bidirectional byte copying (io.Copy) between the two TCP connections
 7. The client simultaneously connects to the local service at `localIP:localPort` and performs bidirectional copying between the local connection and the data connection
-8. When either side closes the connection, a `TunnelClose` message is sent (via the control connection), and the other side cleans up resources
+8. When either side closes the connection, the bridge closes both connections; the peer's `io.Copy` returns and it cleans up resources (no `TunnelClose` message is sent)
 
 **Data Flow — RProxy Mode (Internal → Remote):**
 1. The client listens on `localPort`, waiting for local application connections
@@ -165,7 +165,6 @@ natt/
 │       └── constant.go        # Constants
 ├── integration_test.go        # End-to-end integration tests (including encrypted tunnel verification)
 ├── go.mod
-├── go.sum
 ├── server.json                # Server config example
 ├── client.json                # Client config example
 └── README.md
@@ -201,7 +200,7 @@ type ServerConfig struct {
     Token      string                 // Authentication token, optional
     EncryptKey string                 // AES-256 encryption key (32-byte hex), optional
     LogLevel   string                 // Log level, default "info"
-    LogFile    string                 // Log file path, optional
+    LogFile    string                 // Log file path, parsed for compatibility; currently unused — logs go to stdout
     Clients    map[string]ClientRules // Per-client proxy/rproxy rules, keyed by clientId
 }
 
@@ -212,7 +211,7 @@ type ClientConfig struct {
     EncryptKey string // AES-256 encryption key, must match server
     ClientID   string // Client identity, used by server to look up corresponding rules
     LogLevel   string // Log level, default "info"
-    LogFile    string // Log file path, optional
+    LogFile    string // Log file path, parsed for compatibility; currently unused — logs go to stdout
 
     // The following optional fields can be overridden via config file
     HeartbeatIntervalMs  int // Heartbeat interval (ms), default 45000
@@ -253,7 +252,7 @@ Provides an AES-256-GCM connection wrapper:
 
 | Component | Responsibility |
 |-----------|---------------|
-| **Client** | Main loop: control connection setup → register → config query → message loop (handles TunnelOpen/TunnelClose/HeartbeatAck/ConfigResponse) → reconnect loop upon disconnection |
+| **Client** | Main loop: control connection setup → register → config query → message loop (handles TunnelOpen/HeartbeatAck/TypeError) → reconnect loop upon disconnection |
 | **LocalConnector** | Connects to local service (`localIP:localPort`) on demand; bridges data connection ↔ local connection |
 | **DataConnManager** | Manages data connections: upon receiving `TunnelOpen`, creates a new TCP connection to the server, sends `DataConnect` handshake, then bridges with the local connector |
 | **RProxy** | Listens on the local `localPort` for local application connections; upon receiving one, creates a new TCP connection to the server, sends `DataConnect{mode:"rproxy", rproxyName}`, bridges data connection ↔ local connection |
@@ -266,16 +265,15 @@ Provides an AES-256-GCM connection wrapper:
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  Type (1 byte)    │  Length (2 bytes, big-endian)   │
+│  Type (1 byte)    │  Length (4 bytes, big-endian)   │
 ├──────────────────────────────────────────────────────┤
 │  Payload (JSON, variable length)                     │
-│  ≤ 65535 bytes                                       │
 └──────────────────────────────────────────────────────┘
 ```
 
 - **Type**: message type identifier (1 byte, see section 4.2)
-- **Length**: payload length (2 bytes, big-endian, excluding the 3-byte type+length header)
-- **Payload**: UTF-8 JSON, maximum 65535 bytes
+- **Length**: payload length (4 bytes, big-endian, excluding the 5-byte type+length header)
+- **Payload**: UTF-8 JSON, variable length
 
 > **Note**: The wire-format frame described here operates **within** the CipherConn encryption layer. The actual bytes transmitted over TCP are the encrypted output of CipherConn, not the raw frame content.
 
@@ -284,18 +282,19 @@ Provides an AES-256-GCM connection wrapper:
 | Hex | Constant | Direction | Description |
 |-----|----------|-----------|-------------|
 | `0x01` | `TypeRegister` | Client → Server | Registration request, payload: `{clientId, token, version}` |
-| `0x02` | `TypeRegisterAck` | Server → Client | Registration acknowledgment, payload: `{success, error?}` |
-| `0x03` | `TypeHeartbeat` | Client → Server | Heartbeat request |
-| `0x04` | `TypeHeartbeatAck` | Server → Client | Heartbeat response |
-| `0x05` | `TypeProxyRequest` | Client → Server | Proxy request (legacy), payload: `{proxies: [{name, localIP, localPort, remotePort}]}` |
-| `0x06` | `TypeProxyResponse` | Server → Client | Proxy response (legacy), payload: `{results: [{name, success, remotePort?, error?}]}` |
+| `0x02` | `TypeRegisterAck` | Server → Client | Registration acknowledgment, payload: `{clientId, accepted, message?}` |
+| `0x03` | `TypeProxyRequest` | Client → Server | Proxy request (legacy — no longer sent by the client; the server still handles it), payload: `{proxies: [{name, localIP, localPort, remotePort}]}` |
+| `0x04` | `TypeProxyResponse` | Server → Client | Proxy response (legacy), payload: `{results: [{name, success, remotePort?, error?}]}` |
+| `0x05` | `TypeHeartbeat` | Client → Server | Heartbeat request |
+| `0x06` | `TypeHeartbeatAck` | Server → Client | Heartbeat response |
 | `0x07` | `TypeTunnelOpen` | Server → Client | Tunnel open notification, payload: `{dataConnId, proxyName}` |
-| `0x08` | `TypeDataConnect` | Client → Server | Data connection handshake, payload: `{dataConnId, mode, rproxyName?}` |
-| `0x09` | `TypeTunnelClose` | Either → Peer | Tunnel close notification, payload: `{reason?}` |
-| `0x0A` | `TypeRProxyRequest` | Client → Server | RProxy setup request (legacy), payload: `{rproxies: [{name, remoteIP, remotePort}]}` |
-| `0x0B` | `TypeRProxyResponse` | Server → Client | RProxy setup response (legacy), payload: `{results: [{name, success, error?}]}` |
-| `0x0C` | `TypeConfigQuery` | Client → Server | Config query — client requests proxy/rproxy rules after registration, payload: `{clientId}` |
-| `0x0D` | `TypeConfigResponse` | Server → Client | Config response — server returns rules for this client, payload: `{proxies: [...], rproxies: [...]}` |
+| `0x08` | `TypeDataConnect` | Client → Server | Data connection handshake: proxy mode payload `{dataConnId}`; rproxy mode payload `{mode:"rproxy", rproxyName}` |
+| `0x09` | `TypeTunnelClose` | Reserved | Tunnel close notification — currently never sent by either side; the server only logs it if received |
+| `0x0A` | `TypeError` | Server → Client | Error notification, payload: `{code, message}` (e.g. `AUTH_FAILED`, `EVICTED`); on receipt the client stops and reconnects |
+| `0x0B` | `TypeRProxyRequest` | Client → Server | RProxy setup request (legacy — no longer sent by the client; the server still handles it), payload: `{rproxies: [{name, remoteIP, remotePort}]}` |
+| `0x0C` | `TypeRProxyResponse` | Server → Client | RProxy setup response (legacy), payload: `{results: [{name, success, error?}]}` |
+| `0x0D` | `TypeConfigQuery` | Client → Server | Config query — client requests proxy/rproxy rules after registration, payload: `{clientId}` |
+| `0x0E` | `TypeConfigResponse` | Server → Client | Config response — server returns rules for this client, payload: `{proxies: [...], rproxies: [...]}`; each rule also carries `success` / `error` fields |
 
 ### 4.3 Key Protocol Design Decisions
 
@@ -327,14 +326,13 @@ Control Connection:               Data Connection (per tunnel):
   Client → Server                   Client → Server
   ─────────────────────             ─────────────────────
   1. Register                       1. DataConnect
-  2. RegisterAck                       {dataConnId, mode}
-  3. ConfigQuery
+  2. RegisterAck                       {dataConnId} (proxy) /
+  3. ConfigQuery                       {mode:"rproxy", rproxyName} (rproxy)
   4. ConfigResponse
-  5. Heartbeat (periodic)
-  6. HeartbeatAck (periodic)
-  7. TunnelOpen (pushed)
+  5. Heartbeat (periodic, client → server)
+  6. HeartbeatAck (periodic, server → client)
+  7. TunnelOpen (pushed, server → client)
   ...
-  N. TunnelClose
 ```
 
 ---
@@ -361,7 +359,7 @@ Client                                  Server
   │  └────────────────────────────────┘   │
   │                                       │
   │◄─── RegisterAck ─────────────────────│
-  │  {success:true}                      │
+  │  {accepted:true}                     │
   │                                       │
   │── ConfigQuery ─────────────────────►│
   │  {clientId}                          │
@@ -415,7 +413,7 @@ External User          Server                          Client           Local Se
      │                    │◄── NewCipherConn ──────────│                    │
      │                    │                              │                    │
      │                    │◄── DataConnect ────────────│                    │
-     │                    │  {dataConnId, mode:"proxy"} │                    │
+     │                    │  {dataConnId}               │                    │
      │                    │                              │                    │
      │                    │  Pair external conn          │── TCP Connect ──►│
      │                    │  ⇔ data conn                 │  localIP:localPort│
@@ -425,8 +423,8 @@ External User          Server                          Client           Local Se
      │                    │                              │                    │
      │    Close conn      │                              │                    │
      │──────────────────►│                              │                    │
-     │                    ├── TunnelClose ─────────────►│                    │
-     │                    │   {reason:"client closed"}   │                    │
+     │                    │  Close paired data conn      │                    │
+     │                    │─────────────────────────────►│                    │
      │                    │                              ├── Close local ───►│
      │                    │                              │                    │
 ```
@@ -439,7 +437,7 @@ Client reconnection is a core reliability mechanism — each step is detailed be
 Client.Start()
   │
   ├─ First connection (run()):
-  │    ├─ TCP Dial with 5s timeout
+  │    ├─ TCP Dial with 10s timeout
   │    ├─ TCP keepalive (75s period)
   │    ├─ Wrap as CipherConn(encryptKey)
   │    ├─ Send Register → Receive RegisterAck
@@ -460,11 +458,11 @@ Client.Start()
   │    │         ├─ Send DataConnect handshake
   │    │         └─ Bridge: local service ↔ data conn
   │    │
-  │    ├─ TunnelClose
-  │    │    └─ Close local & data connection pair
-  │    │
   │    ├─ HeartbeatAck
-  │    │    └─ Reset heartbeat timer
+  │    │    └─ Reset heartbeat timer (implicit — the read deadline is per-message)
+  │    │
+  │    ├─ TypeError
+  │    │    └─ Log server error, return error → reconnect
   │    │
   │    └─ Read error (disconnect detected)
   │         ├─ Close control connection
@@ -509,7 +507,7 @@ Notes:
 - Reconnection has **no retry limit**; it retries indefinitely until the server recovers or the client is stopped via Stop()
 - Each reconnection goes through the full registration and config query flow
 - If the ConfigResponse contains failed proxy/rproxy rules (e.g. "remote port already in use", "rproxy already exists"), the server is likely still cleaning up resources from the previous connection. The client waits `ConfigRetryDelay` (3s) before reconnecting to avoid immediate retry failure
-- Data connection disconnection does not affect the control connection. When the server detects a data connection drop, it sends a TunnelClose notification via the control connection to instruct the client to close the corresponding local connection
+- Data connection disconnection does not affect the control connection. When either end of a tunnel closes (EOF/error), the bridge closes both connections; on the client side the local connection is closed as a result of the `io.Copy` returning
 ```
 
 ### 5.4 RProxy Tunnel Establishment Flow
@@ -564,7 +562,7 @@ Local App                  Client                          Server               
 | Long-term network outage | Read timeout (HeartbeatInterval × 3) | Infinite reconnection at max backoff interval of 60s; auto-rebuilds proxy mappings on recovery |
 | DNS resolution failure | net.Dial returns error | Log alert, retry with backoff strategy |
 | DataConnect handshake timeout | Server waits 10s without DataConnect | Close external user connection, release dataConnId resources |
-| Data connection mid-stream disconnection | TCP Read/Write returns error | Server closes paired external connection, sends TunnelClose via control connection |
+| Data connection mid-stream disconnection | TCP Read/Write returns error | The bridge closes both paired connections (data conn ↔ peer); no TunnelClose is sent |
 | Encryption key mismatch | GCM authentication failure / decryption error | Close the current connection, log the error; control connection triggers client reconnection |
 
 ### 6.2 Heartbeat Mechanism
@@ -587,8 +585,8 @@ Client (control connection)            Server
   │                                      │ ports and registration
 ```
 
-- Both client and server maintain their own heartbeat timeout counters
-- Receiving a heartbeat or control message from the peer resets the counter
+- Both client and server detect heartbeat timeout via a read deadline of 3 × HeartbeatInterval (the server uses the fixed default interval, the client its configured interval)
+- Receiving any message from the peer resets the read deadline
 - If the client fails to write a heartbeat (e.g., server already disconnected), it immediately calls `conn.Close()` to close the control connection, unblocking `messageLoop` blocked on `ReadMessage`, and triggers reconnection
 - When the server detects a client timeout: close all associated data connections, release proxy ports, remove registration
 
@@ -597,8 +595,8 @@ Client (control connection)            Server
 | Resource | Protection |
 |----------|-----------|
 | Control connection TCP | `defer conn.Close()`; set read timeout; active close on heartbeat timeout |
-| Data connection TCP | `io.Copy` returns error on either end → close both ends; set `KeepAlive` to prevent zombie connections |
-| Goroutine | Each data bridge uses an independent goroutine managed by `errgroup`; on control connection exit, cancel all data goroutines via context |
+| Data connection TCP | `io.Copy` returns error on either end → close both ends (closeBoth); client-established connections enable TCP keepalive (75s) |
+| Goroutine | Each data bridge runs its own goroutines (`sync.WaitGroup` + `sync.Once`); when either direction ends (EOF/error), both connections are closed; on the client side, tunnel contexts are cancelled on control-connection loss, closing the data and local connections |
 | dataConnId | Released after use; clean up the waiting queue when DataConnect times out, preventing ID leaks |
 | Encryption context | Each CipherConn holds its own GCM instance; automatically released when the connection closes; no extra cleanup needed |
 | Proxy ports | Server records port ↔ client mapping; automatically releases associated ports and data connections when client control connection disconnects |
@@ -609,21 +607,21 @@ Client (control connection)            Server
 SIGINT / SIGTERM received
   │
   ├─ 1. Stop accepting new connections
-  │     (Server stops Listener; Client stops reconnection loop)
+  │     (Server closes Listener; Client stops the reconnection loop)
   │
   ├─ 2. Close all active data connections
-  │     ├─ Stop io.Copy forwarding
-  │     ├─ Close data connection TCP (Client side)
-  │     └─ Close paired external user connection (Server side)
+  │     ├─ Client: cancel all tunnel contexts → data conn & local conn closed
+  │     ├─ Client: close all rproxy listeners (listener + active data conns)
+  │     └─ Server: close all proxy listeners and pending external connections
   │
-  ├─ 3. Notify peer of shutdown (via control connection)
-  │     ├─ Client → Server sends close message
-  │     └─ Wait for acknowledgment (3s timeout)
+  ├─ 3. Close control connection
+  │     (Closing the control conn makes the peer's ReadMessage return an
+  │      error, triggering its own cleanup; the client then reconnects)
   │
-  ├─ 4. Close control connection
-  │
-  └─ 5. Release all listening ports → exit (os.Exit(0))
-     (Overall timeout 10s; force exit if not completed)
+  └─ 4. Release all listening ports → exit
+
+The current implementation does not send an explicit shutdown notification to
+the peer — closing the connection itself triggers peer-side cleanup.
 ```
 
 ---
@@ -684,7 +682,7 @@ SIGINT / SIGTERM received
 - `token`: Authentication token, optional (leave empty to disable)
 - `encryptKey`: AES-256 key (32-byte hex-encoded), optional (leave empty to disable encryption), can be generated via `natt keygen`
 - `logLevel`: Log level `debug|info|warn|error`, default `"info"`
-- `logFile`: Log file path, optional (leave empty for stdout)
+- `logFile`: Log file path, parsed for compatibility — **currently unused**, logs always go to stdout
 - `clients`: Per-client proxy and rproxy rule definitions, keyed by `clientId` (the `clientId` sent in the `Register` message)
   - `proxies[]`: Proxy mapping rules for this client
     - `name`: Rule name (unique per client)
@@ -717,6 +715,7 @@ SIGINT / SIGTERM received
 - `serverAddr`: Server address (required)
 - `serverPort`: Server port, default `7000`
 - `token` / `encryptKey`: Authentication and encryption keys, must match the server
+- `logFile`: Log file path, parsed for compatibility — **currently unused**, logs always go to stdout
 - `clientId`: Client identity, used by the server to look up the corresponding proxy/rproxy rules (必须与 server.json 中 `clients` 的 key 对应)
 - `heartbeatIntervalMs`: Heartbeat interval (ms), default `45000`
 - `reconnectBaseDelayMs`: Reconnect base delay (ms), default `500`
@@ -789,22 +788,18 @@ go vet ./pkg/... ./cmd/...                           # Code check (static analys
 
 ### 8.3 Integration Test Plan
 
-```
-1. Start Server locally (bindAddr="127.0.0.1", bindPort=0 → random port)
-   - Server config includes client rules for "client-a": proxy(localPort=22, remotePort=0)
-2. Start Client (clientId="client-a") to connect to the above Server
-3. Client sends Register → receives RegisterAck
-4. Client sends ConfigQuery → receives ConfigResponse with proxy rules for "client-a"
-5. Client applies received config; Server listens on assigned remotePort
-6. External connection to remotePort → verify data reaches client's local port 22
-7. Disconnect Client → verify Server cleans up the proxy port
-8. Client reconnects → verify re-registration, config re-query, and proxy restoration
-9. [Delayed-retry test] While Client is connected, start a second Client with the same clientId
-   → first Client receives TypeError(EVICTED) and reconnects immediately
-   → if the reconnect's ConfigResponse contains failed rules (port still in use),
-     verify the client waits ~3s (ConfigRetryDelay) before the next reconnect attempt
-10. [Multi-client test] Start a second Client (clientId="client-b") with different rules
-    → verify each client receives its own rule set and proxy ports
+`integration_test.go` (build tag `integration`) contains:
+
+1. `TestCipherConnOverTCP` — verifies CipherConn (AES-256-GCM) over a real TCP connection: writes "hello-test" and reads it back decrypted.
+2. `TestEncryptedClientManual` — end-to-end encrypted tunnel: starts a real server (encryption + token + one client rule with `remotePort=0` for random assignment), then manually performs the protocol steps — Register → RegisterAck → ConfigQuery → ConfigResponse (the server assigns the port), connects to the assigned proxy port as an external user, reads the `TunnelOpen` notification, opens a new encrypted data connection with `DataConnect{dataConnId}`, and verifies an echo round-trip through the tunnel.
+3. `TestEncryptedServerClient` — currently skipped (kept for reference; the end-to-end encrypted tunnel scenario is covered by `TestEncryptedClientManual`).
+
+The tests exercise the `server` package and the wire protocol directly, but do not yet cover the real `client` package, reconnection/cleanup, eviction (TypeError `EVICTED`), or multi-client scenarios — those remain manual/QA items.
+
+Run with:
+
+```bash
+go test -tags=integration -v -count=1 -timeout 120s .
 ```
 
 ---
