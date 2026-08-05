@@ -153,13 +153,24 @@ func (pm *ProxyManager) PairDataConn(dataConnID string, dataConn net.Conn) bool 
 		"proxy", p.proxy.Name,
 	)
 
-	// Bridge: external conn ↔ data conn
+	// Bridge: external conn ↔ data conn. When either direction ends (peer
+	// EOF/error), close both sides so the other direction unblocks instead
+	// of lingering forever.
 	go func() {
+		var closeOnce sync.Once
+		closeBoth := func() {
+			closeOnce.Do(func() {
+				dataConn.Close()
+				extConn.Close()
+			})
+		}
+
 		var wg sync.WaitGroup
 		wg.Add(2)
 
 		go func() {
 			defer wg.Done()
+			defer closeBoth()
 			_, err := io.Copy(dataConn, extConn)
 			if err != nil {
 				slog.Debug("bridge ext→data closed", "dataConnId", dataConnID, "error", err)
@@ -167,6 +178,7 @@ func (pm *ProxyManager) PairDataConn(dataConnID string, dataConn net.Conn) bool 
 		}()
 		go func() {
 			defer wg.Done()
+			defer closeBoth()
 			_, err := io.Copy(extConn, dataConn)
 			if err != nil {
 				slog.Debug("bridge data→ext closed", "dataConnId", dataConnID, "error", err)
@@ -174,8 +186,6 @@ func (pm *ProxyManager) PairDataConn(dataConnID string, dataConn net.Conn) bool 
 		}()
 
 		wg.Wait()
-		dataConn.Close()
-		extConn.Close()
 		slog.Debug("bridge closed", "dataConnId", dataConnID)
 	}()
 
@@ -229,6 +239,15 @@ func (pm *ProxyManager) StopClientProxies(clientID string) {
 	delete(pm.clientPorts, clientID)
 	rpNames := pm.clientRProps[clientID]
 	delete(pm.clientRProps, clientID)
+
+	// Close any pending external connections owned by this client. They are
+	// waiting for a DataConnect that will never arrive once the client is gone.
+	for id, p := range pm.pending {
+		if p.proxy.ClientID == clientID {
+			p.conn.Close()
+			delete(pm.pending, id)
+		}
+	}
 	pm.mu.Unlock()
 
 	for _, port := range ports {
