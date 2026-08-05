@@ -465,21 +465,31 @@ func (s *Server) handleDataConn(conn net.Conn, msg *protocol.Message) {
 		}
 		slog.Debug("rproxy connected", "name", dc.RProxyName, "remote", remoteAddr)
 
-		// Bridge data conn ↔ remote conn
+		// Bridge data conn ↔ remote conn. When either direction ends (peer
+		// EOF/error), close both sides so the other direction unblocks
+		// instead of lingering forever.
 		go func() {
+			var closeOnce sync.Once
+			closeBoth := func() {
+				closeOnce.Do(func() {
+					conn.Close()
+					remoteConn.Close()
+				})
+			}
+
 			var wg sync.WaitGroup
 			wg.Add(2)
 			go func() {
 				defer wg.Done()
+				defer closeBoth()
 				io.Copy(remoteConn, conn)
 			}()
 			go func() {
 				defer wg.Done()
+				defer closeBoth()
 				io.Copy(conn, remoteConn)
 			}()
 			wg.Wait()
-			conn.Close()
-			remoteConn.Close()
 			slog.Debug("rproxy bridge closed", "name", dc.RProxyName)
 		}()
 		return
