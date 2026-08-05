@@ -45,12 +45,24 @@ func (dm *DataConnManager) StartTunnel(ctx context.Context, dataConnID, proxyNam
 		return
 	}
 
+	// Monitor context cancellation as early as possible so an early cancel
+	// (e.g. control connection dropped mid-dial) still closes the data conn.
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			dataConn.Close()
+		case <-done:
+		}
+	}()
+
 	// Wrap with encryption
 	if dm.encryptKey != nil {
 		cipherConn, cerr := crypto.NewCipherConn(dataConn, dm.encryptKey)
 		if cerr != nil {
 			slog.Warn("wrap data conn cipher", "dataConnId", dataConnID, "error", cerr)
 			dataConn.Close()
+			close(done)
 			return
 		}
 		dataConn = cipherConn
@@ -64,7 +76,18 @@ func (dm *DataConnManager) StartTunnel(ctx context.Context, dataConnID, proxyNam
 	if err := protocol.WriteMessage(dataConn, msg); err != nil {
 		slog.Warn("write DataConnect failed", "dataConnId", dataConnID, "error", err)
 		dataConn.Close()
+		close(done)
 		return
+	}
+
+	// If the context was already cancelled during the dial, abort now.
+	select {
+	case <-ctx.Done():
+		slog.Warn("tunnel cancelled before local connect", "dataConnId", dataConnID)
+		dataConn.Close()
+		close(done)
+		return
+	default:
 	}
 
 	// Connect to local service
@@ -77,6 +100,7 @@ func (dm *DataConnManager) StartTunnel(ctx context.Context, dataConnID, proxyNam
 			"error", err,
 		)
 		dataConn.Close()
+		close(done)
 		return
 	}
 
@@ -85,36 +109,31 @@ func (dm *DataConnManager) StartTunnel(ctx context.Context, dataConnID, proxyNam
 		"proxy", proxyName,
 	)
 
-	// Monitor context cancellation to close the tunnel
-	go func() {
-		<-ctx.Done()
-		dataConn.Close()
-		localConn.Close()
-	}()
+	// Bridge: data conn ↔ local conn.
+	// When either direction ends (peer EOF/error), close both sides so the
+	// other direction unblocks immediately instead of lingering forever.
+	// close(done) also releases the early-cancel watcher above.
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			dataConn.Close()
+			localConn.Close()
+			close(done)
+		})
+	}
 
-	// Bridge: data conn ↔ local conn
-	var wg sync.WaitGroup
-	wg.Add(2)
-
 	go func() {
-		defer wg.Done()
+		defer closeBoth()
 		_, err := io.Copy(dataConn, localConn)
 		if err != nil {
 			slog.Debug("bridge local→data closed", "dataConnId", dataConnID, "error", err)
 		}
 	}()
 	go func() {
-		defer wg.Done()
+		defer closeBoth()
 		_, err := io.Copy(localConn, dataConn)
 		if err != nil {
 			slog.Debug("bridge data→local closed", "dataConnId", dataConnID, "error", err)
 		}
-	}()
-
-	go func() {
-		wg.Wait()
-		dataConn.Close()
-		localConn.Close()
-		slog.Debug("tunnel closed", "dataConnId", dataConnID)
 	}()
 }
