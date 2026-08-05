@@ -3,7 +3,9 @@
 set -euo pipefail
 
 BIN_DIR="bin"
-LDFLAGS="-w -s"
+# Version injected into the binary; override with VERSION=... ./build.sh
+VERSION="${VERSION:-0.1.0}"
+LDFLAGS="-w -s -X main.Version=${VERSION}"
 CMD_ROOT="./cmd/natt"
 
 mkdir -p "$BIN_DIR"
