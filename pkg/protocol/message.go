@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+
+	"natt/pkg/common"
 )
 
 // MessageType is the single byte identifying a message.
@@ -59,6 +61,9 @@ func Decode(data []byte) (*Message, error) {
 	}
 	msgType := MessageType(data[0])
 	length := int(data[1])<<24 | int(data[2])<<16 | int(data[3])<<8 | int(data[4])
+	if length > common.MaxPayloadSize {
+		return nil, fmt.Errorf("protocol: frame payload too large (%d bytes, max %d)", length, common.MaxPayloadSize)
+	}
 	if 5+length > len(data) {
 		return nil, fmt.Errorf("protocol: frame payload truncated (need %d, have %d)", 5+length, len(data))
 	}
@@ -80,6 +85,12 @@ func ReadMessage(conn net.Conn) (*Message, error) {
 
 	msgType := MessageType(header[0])
 	length := int(header[1])<<24 | int(header[2])<<16 | int(header[3])<<8 | int(header[4])
+
+	// Reject oversized payloads before allocating, so a malicious peer
+	// cannot force a multi-GiB allocation from a tiny length prefix.
+	if length > common.MaxPayloadSize {
+		return nil, fmt.Errorf("protocol: frame payload too large (%d bytes, max %d)", length, common.MaxPayloadSize)
+	}
 
 	// Read the payload
 	payload := make([]byte, length)
