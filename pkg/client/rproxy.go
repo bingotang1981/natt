@@ -27,6 +27,11 @@ type RProxyListener struct {
 	serverPort int
 	encKey     []byte
 	closeCh    chan struct{}
+
+	// conns tracks active data connections so Close() can tear them down
+	// even when the bridging io.Copy would otherwise block forever.
+	connsMu sync.Mutex
+	conns   map[net.Conn]struct{}
 }
 
 // NewRProxyListener creates and starts an rproxy listener.
@@ -49,10 +54,25 @@ func NewRProxyListener(name string, localPort int, remoteIP string, remotePort i
 		serverPort: serverPort,
 		encKey:     encKey,
 		closeCh:    make(chan struct{}),
+		conns:      make(map[net.Conn]struct{}),
 	}
 
 	go rp.acceptLoop()
 	return rp, nil
+}
+
+// trackConn records an active data connection.
+func (rp *RProxyListener) trackConn(c net.Conn) {
+	rp.connsMu.Lock()
+	defer rp.connsMu.Unlock()
+	rp.conns[c] = struct{}{}
+}
+
+// untrackConn removes a finished data connection from tracking.
+func (rp *RProxyListener) untrackConn(c net.Conn) {
+	rp.connsMu.Lock()
+	defer rp.connsMu.Unlock()
+	delete(rp.conns, c)
 }
 
 func (rp *RProxyListener) acceptLoop() {
@@ -85,6 +105,11 @@ func (rp *RProxyListener) handleConn(localConn net.Conn) {
 	}
 	defer dataConn.Close()
 
+	// Track the data connection so Close() can tear it down if the
+	// bridging io.Copy would otherwise block forever.
+	rp.trackConn(dataConn)
+	defer rp.untrackConn(dataConn)
+
 	// Wrap with encryption
 	if rp.encKey != nil {
 		cipherConn, cerr := crypto.NewCipherConn(dataConn, rp.encKey)
@@ -109,22 +134,34 @@ func (rp *RProxyListener) handleConn(localConn net.Conn) {
 	slog.Debug("rproxy tunnel established", "name", rp.name,
 		"local", localConn.RemoteAddr())
 
-	// Bridge local conn ↔ data conn
+	// Bridge local conn ↔ data conn. When either direction ends (peer
+	// EOF/error), close both sides so the other direction unblocks instead
+	// of lingering forever.
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			dataConn.Close()
+			localConn.Close()
+		})
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
+		defer closeBoth()
 		io.Copy(dataConn, localConn)
 	}()
 	go func() {
 		defer wg.Done()
+		defer closeBoth()
 		io.Copy(localConn, dataConn)
 	}()
 	wg.Wait()
 	slog.Debug("rproxy tunnel closed", "name", rp.name)
 }
 
-// Close stops the rproxy listener.
+// Close stops the rproxy listener and closes all active data connections.
 func (rp *RProxyListener) Close() {
 	select {
 	case <-rp.closeCh:
@@ -133,5 +170,14 @@ func (rp *RProxyListener) Close() {
 		close(rp.closeCh)
 	}
 	rp.listener.Close()
+
+	// Close active data connections so their bridging goroutines unblock
+	// instead of lingering after the control connection is gone.
+	rp.connsMu.Lock()
+	for c := range rp.conns {
+		c.Close()
+	}
+	rp.connsMu.Unlock()
+
 	slog.Info("rproxy stopped", "name", rp.name)
 }
