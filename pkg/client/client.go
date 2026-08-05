@@ -206,6 +206,10 @@ func (c *Client) register(conn net.Conn) error {
 		return fmt.Errorf("send Register: %w", err)
 	}
 
+	// Set a handshake deadline so we don't block forever waiting for
+	// RegisterAck if the server never responds (e.g. connection reset
+	// lost in the network). Without this, the client could hang for hours.
+	conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	ack, err := protocol.ReadMessage(conn)
 	if err != nil {
 		return fmt.Errorf("read RegisterAck: %w", err)
@@ -238,6 +242,8 @@ func (c *Client) configQuery(conn net.Conn) (*configQueryResult, error) {
 		return nil, fmt.Errorf("send ConfigQuery: %w", err)
 	}
 
+	// Handshake deadline: same rationale as in register().
+	conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	resp, err := protocol.ReadMessage(conn)
 	if err != nil {
 		return nil, fmt.Errorf("read ConfigResponse: %w", err)
@@ -305,6 +311,12 @@ type configQueryResult struct {
 // configRetryDelay is how long to wait before reconnecting when proxy/rproxy
 // rules fail to start (the server may still be cleaning up stale resources).
 const configRetryDelay = 3 * time.Second
+
+// handshakeTimeout bounds how long register() and configQuery() wait for the
+// server's response. Normal handshakes complete in milliseconds; a timeout
+// means the server never replied (dead/reset connection) and we should
+// reconnect instead of blocking forever.
+const handshakeTimeout = 15 * time.Second
 
 // hasFailedRules reports whether any proxy or rproxy rule in the ConfigResponse
 // failed to start on the server side.
