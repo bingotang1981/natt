@@ -443,6 +443,7 @@ func (s *Server) handleDataConn(conn net.Conn, msg *protocol.Message) {
 		RProxyName string `json:"rproxyName"`
 	}
 	if err := json.Unmarshal(msg.Payload, &dc); err != nil {
+		conn.Close()
 		slog.Warn("invalid DataConnect payload", "error", err)
 		return
 	}
@@ -451,12 +452,14 @@ func (s *Server) handleDataConn(conn net.Conn, msg *protocol.Message) {
 	if dc.Mode == "rproxy" || dc.RProxyName != "" {
 		rp := s.proxyManager.GetRProxy(dc.RProxyName)
 		if rp == nil {
+			conn.Close()
 			slog.Warn("rproxy not found", "name", dc.RProxyName)
 			return
 		}
 		remoteAddr := net.JoinHostPort(rp.RemoteIP, strconv.Itoa(rp.RemotePort))
 		remoteConn, err := net.DialTimeout("tcp", remoteAddr, 10*time.Second)
 		if err != nil {
+			conn.Close()
 			slog.Warn("dial remote failed", "rproxy", dc.RProxyName, "remote", remoteAddr, "error", err)
 			return
 		}
@@ -484,6 +487,7 @@ func (s *Server) handleDataConn(conn net.Conn, msg *protocol.Message) {
 
 	// proxy mode (default): pair with waiting external connection
 	if !s.proxyManager.PairDataConn(dc.DataConnID, conn) {
+		conn.Close()
 		slog.Warn("no pending connection for dataConnId", "dataConnId", dc.DataConnID)
 	}
 }
