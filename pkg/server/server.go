@@ -234,7 +234,6 @@ func (s *Server) handleControlConn(conn net.Conn, msg *protocol.Message) {
 	}()
 
 	// Control message loop
-	lastActivity := time.Now()
 	for {
 		conn.SetReadDeadline(time.Now().Add(common.HeartbeatTimeoutMultiplier * common.DefaultHeartbeatInterval))
 		msg, err := protocol.ReadMessage(conn)
@@ -242,61 +241,11 @@ func (s *Server) handleControlConn(conn net.Conn, msg *protocol.Message) {
 			slog.Info("control connection closed", "clientId", reg.ClientID, "error", err)
 			return
 		}
-		lastActivity = time.Now()
 
 		switch msg.Type {
 		case protocol.TypeHeartbeat:
 			// Reply with HeartbeatAck
 			protocol.WriteMessage(conn, &protocol.Message{Type: protocol.TypeHeartbeatAck})
-			_ = lastActivity
-
-		case protocol.TypeProxyRequest:
-			var req struct {
-				Proxies []struct {
-					Name       string `json:"name"`
-					LocalIP    string `json:"localIP"`
-					LocalPort  int    `json:"localPort"`
-					RemotePort int    `json:"remotePort"`
-				} `json:"proxies"`
-			}
-			if err := json.Unmarshal(msg.Payload, &req); err != nil {
-				slog.Warn("invalid ProxyRequest", "clientId", reg.ClientID, "error", err)
-				continue
-			}
-
-			type proxyResult struct {
-				Name       string `json:"name"`
-				Success    bool   `json:"success"`
-				RemotePort int    `json:"remotePort"`
-				Error      string `json:"error,omitempty"`
-			}
-			var results []proxyResult
-
-			for _, p := range req.Proxies {
-				ps := ProxyState{
-					Name:       p.Name,
-					LocalIP:    p.LocalIP,
-					LocalPort:  p.LocalPort,
-					RemotePort: p.RemotePort,
-				}
-				actualPort, err := s.proxyManager.StartProxy(ps, conn, reg.ClientID)
-				if err != nil {
-					slog.Warn("start proxy failed", "name", p.Name, "error", err)
-					results = append(results, proxyResult{
-						Name: p.Name, Success: false, RemotePort: p.RemotePort, Error: err.Error(),
-					})
-				} else {
-					slog.Info("proxy started", "name", p.Name, "port", actualPort)
-					results = append(results, proxyResult{
-						Name: p.Name, Success: true, RemotePort: actualPort,
-					})
-				}
-			}
-
-			respPayload, _ := json.Marshal(map[string]interface{}{"results": results})
-			protocol.WriteMessage(conn, &protocol.Message{
-				Type: protocol.TypeProxyResponse, Payload: respPayload,
-			})
 
 		case protocol.TypeConfigQuery:
 			slog.Info("config query from client", "clientId", reg.ClientID)
@@ -375,47 +324,6 @@ func (s *Server) handleControlConn(conn net.Conn, msg *protocol.Message) {
 			})
 			protocol.WriteMessage(conn, &protocol.Message{
 				Type: protocol.TypeConfigResponse, Payload: respPayload,
-			})
-
-		case protocol.TypeRProxyRequest:
-			var rpReq struct {
-				RProxies []struct {
-					Name       string `json:"name"`
-					LocalPort  int    `json:"localPort"`
-					RemoteIP   string `json:"remoteIP"`
-					RemotePort int    `json:"remotePort"`
-				} `json:"rproxies"`
-			}
-			if err := json.Unmarshal(msg.Payload, &rpReq); err != nil {
-				slog.Warn("invalid RProxyRequest", "clientId", reg.ClientID, "error", err)
-				continue
-			}
-
-			type rproxyResult struct {
-				Name    string `json:"name"`
-				Success bool   `json:"success"`
-				Error   string `json:"error,omitempty"`
-			}
-			var rpResults []rproxyResult
-
-			for _, r := range rpReq.RProxies {
-				rs := RProxyState{
-					Name:       r.Name,
-					RemoteIP:   r.RemoteIP,
-					RemotePort: r.RemotePort,
-					ClientID:   reg.ClientID,
-				}
-				if err := s.proxyManager.StartRProxy(rs); err != nil {
-					slog.Warn("start rproxy failed", "name", r.Name, "error", err)
-					rpResults = append(rpResults, rproxyResult{Name: r.Name, Success: false, Error: err.Error()})
-				} else {
-					rpResults = append(rpResults, rproxyResult{Name: r.Name, Success: true})
-				}
-			}
-
-			rpRespPayload, _ := json.Marshal(map[string]interface{}{"results": rpResults})
-			protocol.WriteMessage(conn, &protocol.Message{
-				Type: protocol.TypeRProxyResponse, Payload: rpRespPayload,
 			})
 
 		case protocol.TypeTunnelClose:
