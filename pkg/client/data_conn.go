@@ -113,6 +113,10 @@ func (dm *DataConnManager) StartTunnel(ctx context.Context, dataConnID, proxyNam
 	// When either direction ends (peer EOF/error), close both sides so the
 	// other direction unblocks immediately instead of lingering forever.
 	// close(done) also releases the early-cancel watcher above.
+	// StartTunnel blocks here until the tunnel ends: this keeps the caller's
+	// context.CancelFunc reachable (via the c.tunnels map) for the whole
+	// lifetime of the tunnel, so closeAllTunnels() can tear it down on
+	// control-connection loss instead of leaving an orphaned tunnel.
 	var closeOnce sync.Once
 	closeBoth := func() {
 		closeOnce.Do(func() {
@@ -122,7 +126,10 @@ func (dm *DataConnManager) StartTunnel(ctx context.Context, dataConnID, proxyNam
 		})
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		defer closeBoth()
 		_, err := io.Copy(dataConn, localConn)
 		if err != nil {
@@ -130,10 +137,13 @@ func (dm *DataConnManager) StartTunnel(ctx context.Context, dataConnID, proxyNam
 		}
 	}()
 	go func() {
+		defer wg.Done()
 		defer closeBoth()
 		_, err := io.Copy(localConn, dataConn)
 		if err != nil {
 			slog.Debug("bridge data→local closed", "dataConnId", dataConnID, "error", err)
 		}
 	}()
+	wg.Wait()
+	slog.Debug("tunnel closed", "dataConnId", dataConnID)
 }
