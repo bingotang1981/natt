@@ -283,16 +283,16 @@ Provides an AES-256-GCM connection wrapper:
 |-----|----------|-----------|-------------|
 | `0x01` | `TypeRegister` | Client → Server | Registration request, payload: `{clientId, token, version}` |
 | `0x02` | `TypeRegisterAck` | Server → Client | Registration acknowledgment, payload: `{clientId, accepted, message?}` |
-| `0x03` | `TypeProxyRequest` | Client → Server | Proxy request (legacy — no longer sent by the client; the server still handles it), payload: `{proxies: [{name, localIP, localPort, remotePort}]}` |
-| `0x04` | `TypeProxyResponse` | Server → Client | Proxy response (legacy), payload: `{results: [{name, success, remotePort?, error?}]}` |
+| `0x03` | `TypeProxyRequest` | Client → Server | Proxy request (legacy — reserved; neither side uses it anymore; client uses `ConfigQuery` instead) |
+| `0x04` | `TypeProxyResponse` | Server → Client | Proxy response (legacy — reserved) |
 | `0x05` | `TypeHeartbeat` | Client → Server | Heartbeat request |
 | `0x06` | `TypeHeartbeatAck` | Server → Client | Heartbeat response |
 | `0x07` | `TypeTunnelOpen` | Server → Client | Tunnel open notification, payload: `{dataConnId, proxyName}` |
 | `0x08` | `TypeDataConnect` | Client → Server | Data connection handshake: proxy mode payload `{dataConnId}`; rproxy mode payload `{mode:"rproxy", rproxyName}` |
 | `0x09` | `TypeTunnelClose` | Reserved | Tunnel close notification — currently never sent by either side; the server only logs it if received |
 | `0x0A` | `TypeError` | Server → Client | Error notification, payload: `{code, message}` (e.g. `AUTH_FAILED`, `EVICTED`); on receipt the client stops and reconnects |
-| `0x0B` | `TypeRProxyRequest` | Client → Server | RProxy setup request (legacy — no longer sent by the client; the server still handles it), payload: `{rproxies: [{name, remoteIP, remotePort}]}` |
-| `0x0C` | `TypeRProxyResponse` | Server → Client | RProxy setup response (legacy), payload: `{results: [{name, success, error?}]}` |
+| `0x0B` | `TypeRProxyRequest` | Client → Server | RProxy setup request (legacy — reserved; neither side uses it anymore; client uses `ConfigQuery` instead) |
+| `0x0C` | `TypeRProxyResponse` | Server → Client | RProxy setup response (legacy — reserved) |
 | `0x0D` | `TypeConfigQuery` | Client → Server | Config query — client requests proxy/rproxy rules after registration, payload: `{clientId}` |
 | `0x0E` | `TypeConfigResponse` | Server → Client | Config response — server returns rules for this client, payload: `{proxies: [...], rproxies: [...]}`; each rule also carries `success` / `error` fields |
 
