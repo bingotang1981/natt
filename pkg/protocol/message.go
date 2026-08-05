@@ -54,15 +54,29 @@ func Encode(msg *Message) []byte {
 	return buf
 }
 
+// headerLen is the size of the protocol frame header: 1 byte type + 4 byte length.
+const headerLen = 5
+
+// parseHeader parses the frame header and validates the declared payload
+// length. It is the single point where the length prefix is interpreted and
+// the size limit is enforced, shared by Decode and ReadMessage.
+func parseHeader(header []byte) (MessageType, int, error) {
+	if len(header) < headerLen {
+		return 0, 0, fmt.Errorf("protocol: frame too short (%d bytes)", len(header))
+	}
+	msgType := MessageType(header[0])
+	length := int(header[1])<<24 | int(header[2])<<16 | int(header[3])<<8 | int(header[4])
+	if length > common.MaxPayloadSize {
+		return 0, 0, fmt.Errorf("protocol: frame payload too large (%d bytes, max %d)", length, common.MaxPayloadSize)
+	}
+	return msgType, length, nil
+}
+
 // Decode parses a byte slice into a Message.
 func Decode(data []byte) (*Message, error) {
-	if len(data) < 5 {
-		return nil, fmt.Errorf("protocol: frame too short (%d bytes)", len(data))
-	}
-	msgType := MessageType(data[0])
-	length := int(data[1])<<24 | int(data[2])<<16 | int(data[3])<<8 | int(data[4])
-	if length > common.MaxPayloadSize {
-		return nil, fmt.Errorf("protocol: frame payload too large (%d bytes, max %d)", length, common.MaxPayloadSize)
+	msgType, length, err := parseHeader(data)
+	if err != nil {
+		return nil, err
 	}
 	if 5+length > len(data) {
 		return nil, fmt.Errorf("protocol: frame payload truncated (need %d, have %d)", 5+length, len(data))
@@ -78,18 +92,17 @@ func Decode(data []byte) (*Message, error) {
 // (handled transparently by CipherConn), then parses the inner protocol frame.
 func ReadMessage(conn net.Conn) (*Message, error) {
 	// Read the 5-byte header (type + 4-byte length)
-	var header [5]byte
+	var header [headerLen]byte
 	if _, err := io.ReadFull(conn, header[:]); err != nil {
 		return nil, err
 	}
 
-	msgType := MessageType(header[0])
-	length := int(header[1])<<24 | int(header[2])<<16 | int(header[3])<<8 | int(header[4])
-
-	// Reject oversized payloads before allocating, so a malicious peer
-	// cannot force a multi-GiB allocation from a tiny length prefix.
-	if length > common.MaxPayloadSize {
-		return nil, fmt.Errorf("protocol: frame payload too large (%d bytes, max %d)", length, common.MaxPayloadSize)
+	// parseHeader rejects oversized payloads before we allocate, so a
+	// malicious peer cannot force a multi-GiB allocation from a tiny
+	// length prefix.
+	msgType, length, err := parseHeader(header[:])
+	if err != nil {
+		return nil, err
 	}
 
 	// Read the payload
