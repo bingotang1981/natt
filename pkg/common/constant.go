@@ -26,4 +26,12 @@ const (
 
 	// ShutdownGracePeriod is the overall graceful shutdown timeout.
 	ShutdownGracePeriod = 10 * time.Second
+
+	// MaxPayloadSize caps the plaintext payload of a single protocol frame
+	// (and, plus framing overhead, of a single encrypted packet on the wire).
+	// It defends against memory exhaustion from malicious peers declaring
+	// huge lengths (up to ~4 GiB) in the length prefix. Real traffic is far
+	// smaller: data packets are bounded by io.Copy's 32 KiB buffer and
+	// control messages are a few KiB at most.
+	MaxPayloadSize = 4 << 20 // 4 MiB
 )
