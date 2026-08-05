@@ -23,6 +23,12 @@ import (
 	"natt/pkg/server"
 )
 
+// Version is the software version, printed in the startup logs.
+// It can be overridden at build time via:
+//
+//	go build -ldflags "-X main.Version=v1.2.3" ./cmd/natt
+var Version = "0.1.0"
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -75,6 +81,7 @@ func runServer(args []string) {
 	}
 
 	initLogger(cfg.LogLevel)
+	slog.Info("natt server starting", "version", Version)
 
 	srv, err := server.New(cfg)
 	if err != nil {
@@ -145,6 +152,7 @@ func runClient(args []string) {
 	}()
 
 	slog.Info("client starting",
+		"version", Version,
 		"server", net.JoinHostPort(cfg.ServerAddr, strconv.Itoa(cfg.ServerPort)),
 	)
 
