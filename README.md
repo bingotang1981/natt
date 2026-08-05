@@ -1,6 +1,6 @@
 # natt — NAT Traversal Tool
 
-[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 natt is a lightweight NAT traversal tool written in Go, with **zero external dependencies**. It supports two modes of operation:
@@ -134,7 +134,7 @@ curl http://your-server.com:8080
 1. An external user connects to the server's `remotePort`
 2. The server sends a `TunnelOpen` notification to the client over the control connection
 3. The client **establishes a new TCP connection** to the server
-4. The client sends a `DataConnect{mode:"proxy"}` handshake on this connection
+4. The client sends a `DataConnect{dataConnId}` handshake on this connection
 5. The server pairs the external user's connection with the client's data connection
 6. Both sides perform `io.Copy` for bidirectional data forwarding
 
@@ -248,7 +248,7 @@ Options:
 | Proxy/rproxy setup failure on reconnect | ConfigResponse contains failed rules (port in use / rproxy already exists) → client waits 3s then reconnects |
 | Key mismatch | GCM authentication failure, immediate connection close + alert |
 | Data connection drop | Does not affect the control connection; only the corresponding tunnel is closed |
-| Graceful shutdown | SIGINT/SIGTERM → close data connections → notify peer → close control connection |
+| Graceful shutdown | SIGINT/SIGTERM → stop accepting → close data connections → close control connection |
 
 ## Testing
 
@@ -268,7 +268,7 @@ go vet ./pkg/... ./cmd/...
 
 ## Build Requirements
 
-- Go 1.22+
+- Go 1.26+
 - Zero external dependencies (standard library only)
 
 ## Project Structure
@@ -288,6 +288,8 @@ natt/
 │   │   ├── local_connector.go
 │   │   └── rproxy.go     # RProxy local port listener
 │   └── common/           # Constants
+├── build.sh              # Cross-platform build script
+├── integration_test.go   # End-to-end integration tests (encrypted tunnel)
 ├── server.json           # Example config
 └── client.json           # Example config
 ```
