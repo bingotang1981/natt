@@ -318,6 +318,10 @@ const configRetryDelay = 3 * time.Second
 // reconnect instead of blocking forever.
 const handshakeTimeout = 15 * time.Second
 
+// heartbeatWriteTimeout bounds how long a heartbeat write may block before the
+// connection is considered dead and closed (triggering reconnection).
+const heartbeatWriteTimeout = 10 * time.Second
+
 // hasFailedRules reports whether any proxy or rproxy rule in the ConfigResponse
 // failed to start on the server side.
 func hasFailedRules(r *configQueryResult) bool {
@@ -459,6 +463,10 @@ func (c *Client) startHeartbeat(conn net.Conn) {
 			select {
 			case <-ticker.C:
 				msg := &protocol.Message{Type: protocol.TypeHeartbeat}
+				// Write deadline so a dead connection with a full send buffer
+				// is detected promptly instead of blocking forever. On timeout
+				// we close the connection to unblock messageLoop.
+				conn.SetWriteDeadline(time.Now().Add(heartbeatWriteTimeout))
 				if err := protocol.WriteMessage(conn, msg); err != nil {
 					slog.Warn("heartbeat write error", "error", err)
 					conn.Close() // unblock messageLoop's ReadMessage
