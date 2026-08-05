@@ -18,9 +18,12 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"time"
+
+	"natt/pkg/common"
 )
 
 const (
@@ -83,6 +86,12 @@ func (c *CipherConn) readNextPacket() error {
 	packetLen := binary.BigEndian.Uint32(header[:])
 	if packetLen < nonceLen+tagLen {
 		return errors.New("crypto: packet too short")
+	}
+	// Reject oversized packets before allocating, so a malicious peer cannot
+	// force a multi-GiB allocation from a tiny length prefix. The encrypted
+	// packet is the plaintext payload plus nonce and GCM tag overhead.
+	if packetLen > uint32(common.MaxPayloadSize)+nonceLen+tagLen {
+		return fmt.Errorf("crypto: packet too large (%d bytes, max %d)", packetLen, common.MaxPayloadSize+nonceLen+tagLen)
 	}
 
 	// Read the full encrypted packet
