@@ -192,12 +192,8 @@ func (c *Client) connectAndServe() error {
 }
 
 func (c *Client) register(conn net.Conn) error {
-	clientID := c.cfg.ClientID
-	if clientID == "" {
-		clientID = fmt.Sprintf("client-%d", time.Now().UnixNano())
-	}
 	payload, _ := json.Marshal(map[string]string{
-		"clientId": clientID,
+		"clientId": c.cfg.ClientID,
 		"token":    c.cfg.Token,
 		"version":  "2.0.0",
 	})
@@ -230,12 +226,8 @@ func (c *Client) register(conn net.Conn) error {
 }
 
 func (c *Client) configQuery(conn net.Conn) (*configQueryResult, error) {
-	clientID := c.cfg.ClientID
-	if clientID == "" {
-		clientID = fmt.Sprintf("client-%d", time.Now().UnixNano())
-	}
 	payload, _ := json.Marshal(map[string]string{
-		"clientId": clientID,
+		"clientId": c.cfg.ClientID,
 	})
 	msg := &protocol.Message{Type: protocol.TypeConfigQuery, Payload: payload}
 	if err := protocol.WriteMessage(conn, msg); err != nil {
