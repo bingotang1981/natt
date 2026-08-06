@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -182,9 +183,17 @@ func (s *Server) handleControlConn(conn net.Conn, msg *protocol.Message) {
 		return
 	}
 
-	// Generate client ID if not provided
+	reg.ClientID = strings.TrimSpace(reg.ClientID)
 	if reg.ClientID == "" {
-		reg.ClientID = fmt.Sprintf("client-%d", time.Now().UnixNano())
+		slog.Warn("register rejected: empty clientId", "remote", conn.RemoteAddr())
+		ackPayload, _ := json.Marshal(map[string]interface{}{
+			"accepted": false,
+			"message":  "clientId is required",
+		})
+		protocol.WriteMessage(conn, &protocol.Message{
+			Type: protocol.TypeRegisterAck, Payload: ackPayload,
+		})
+		return
 	}
 
 	// Send RegisterAck
