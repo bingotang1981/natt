@@ -231,7 +231,7 @@ Options:
 | `serverPort` | int | `7000` | Server port |
 | `token` | string | `""` | Authentication token |
 | `encryptKey` | string | `""` | AES-256 key |
-| `clientId` | string | `""` | Client identity (used by server to look up rules; auto-generated if empty) |
+| `clientId` | string | — | Client identity (required; must match a key in server `clients`) |
 | `logLevel` | string | `"info"` | Log level |
 | `heartbeatIntervalMs` | int | `45000` | Heartbeat interval (milliseconds) |
 | `reconnectBaseDelayMs` | int | `500` | Reconnect base delay (milliseconds) |
